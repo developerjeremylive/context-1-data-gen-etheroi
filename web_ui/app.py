@@ -6,6 +6,7 @@ import os
 import sys
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 
 import streamlit as st
@@ -59,12 +60,62 @@ def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
         return False, f"Failed to clone: {e.stderr}", repo_path
 
 
+def install_project_deps(repo_path: Path, status_callback=None) -> tuple[bool, str]:
+    """Install the project's Python dependencies (rich, anthropic, etc.)."""
+    python_exec = sys.executable
+    
+    # Try uv first, then pip
+    for installer in ["uv", "pip"]:
+        if installer == "uv":
+            check_cmd = [installer, "sync", "--dry-run"]
+        else:
+            check_cmd = [installer, "install", "--dry-run", "."]
+        
+        result = subprocess.run(
+            check_cmd, cwd=str(repo_path),
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            break
+    
+    # Install with uv if available
+    try:
+        result = subprocess.run(
+            [installer, "sync", "--all-extras"],
+            cwd=str(repo_path), capture_output=True, text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            return True, f"Dependencies installed via {installer}"
+    except Exception:
+        pass
+    
+    # Fallback to pip
+    try:
+        result = subprocess.run(
+            [python_exec, "-m", "pip", "install", "-e", ".[all]"],
+            cwd=str(repo_path), capture_output=True, text=True,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            return True, "Dependencies installed via pip"
+    except Exception as e:
+        return False, f"Failed to install dependencies: {e}"
+    
+    return False, f"Could not install deps (tried uv and pip)"
+
+
 def run_pipeline(config: PipelineConfig, output_placeholder, status_placeholder, env: dict) -> tuple[bool, str]:
     """Run the pipeline with the given environment."""
     repo_path = get_repo_path()
     full_env = os.environ.copy()
     full_env["PYTHONPATH"] = str(repo_path)
     full_env.update(env)
+    
+    # Remove empty env vars to avoid confusion
+    for key in [k for k, v in full_env.items() if not v]:
+        del full_env[key]
+    
     cmd = build_command(config, str(repo_path))
     try:
         process = subprocess.Popen(
@@ -87,9 +138,9 @@ def get_generated_files(output_dir: str) -> list[str]:
     return [f.name for f in output_path.glob("*.json")] if output_path.exists() else []
 
 
-# ─── Session state init ───────────────────────────────────────────────────────
+# ─── Session state init ────────────────────────────────────────────────────────
 def _init_state():
-    for key in ["use_env_file", "debug_env", "debug_loaded"]:
+    for key in ["use_env_file", "deps_installed"]:
         if key not in st.session_state:
             st.session_state[key] = False if key == "use_env_file" else None
 
@@ -97,14 +148,36 @@ def _init_state():
 _init_state()
 
 
+# ─── Pollination AI section (only when .env mode active) ──────────────────────
+POLLINATION_MODELS = {
+    "openai-fast (gpt-oss-20b)": "pollinationai/llama-3-70b-instruct",
+    "Mistral 7B": "mistralai/mistral-7b-instruct",
+    "Qwen 2.5 72B": "qwen/qwen-2.5-72b-instruct",
+}
+
+
+def render_pollination_section():
+    """Render Pollination AI model selector when .env mode is active."""
+    st.sidebar.markdown("### 🌸 Pollination AI")
+    st.sidebar.caption("Modelos gratuitos — no requiere API key")
+    
+    selected = st.sidebar.selectbox(
+        "Modelo",
+        options=list(POLLINATION_MODELS.keys()),
+        index=0,
+        key="pollination_model",
+    )
+    
+    return POLLINATION_MODELS[selected]
+
+
 def render_sidebar() -> tuple[str, PipelineConfig]:
     """Render sidebar and return (github_token, config)."""
     st.sidebar.title("🔍 Configuration")
     
-    # ─── .env Toggle (persisted via session_state) ─────────────────────────
+    # ─── .env Toggle ─────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🔐 Source de Keys")
     
-    # Use checkbox (more reliable than toggle for persistence across re-renders)
     use_env = st.sidebar.checkbox(
         "Usar archivo .env",
         value=st.session_state.use_env_file,
@@ -112,11 +185,14 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
              "Se ocultan los campos de API keys en el menú izquierdo.",
         key="use_env_file_cb",
     )
-    # Sync to session state
     st.session_state.use_env_file = use_env
     
+    # ─── Pollination section (only when .env is active) ─────────────────────
+    pollination_model = None
     if use_env:
-        st.sidebar.caption("✅ Cargando keys desde `.env` — campos ocultos.")
+        pollination_model = render_pollination_section()
+        if use_env:
+            st.sidebar.caption("✅ Cargando keys desde `.env` + Pollination AI")
     else:
         st.sidebar.caption("📝 Ingresa las API keys manualmente abajo.")
     
@@ -183,7 +259,6 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
         st.number_input("Max Workers", min_value=1, max_value=32,
                          value=8, key="max_workers")
     
-    # Read from session state (key = the widget key)
     explore_max = st.session_state.get("explore_iter", 20)
     verify_max  = st.session_state.get("verify_retries", 3)
     distract_max = st.session_state.get("distract_iter", 15)
@@ -191,7 +266,7 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
     ext_rounds  = st.session_state.get("ext_rounds", 0)
     max_workers = st.session_state.get("max_workers", 8)
     
-    # ─── API Keys (hidden when using .env) ─────────────────────────────────
+    # ─── API Keys (manual mode only) ─────────────────────────────────────────
     if not use_env:
         st.sidebar.markdown("### 🔑 API Keys")
         anthropic_api_key = st.sidebar.text_input(
@@ -222,6 +297,7 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
         serper_api_key=serper_api_key, jina_api_key=jina_api_key,
         chroma_api_key=chroma_api_key, chroma_database=chroma_database,
         use_env_file=use_env,
+        pollination_model=pollination_model,
     )
     
     return github_token, config
@@ -239,7 +315,11 @@ def main():
     # Mode banner
     use_env = st.session_state.use_env_file
     if use_env:
-        st.success("**🔐 Modo .env activo** — Keys desde `.env`, campos ocultos.")
+        model = config.pollination_model or "default"
+        st.success(
+            f"**🔐 Modo .env activo** — Keys desde `.env` + "
+            f"**Pollination AI** (`{model}`). No se necesita Anthropic API key."
+        )
     else:
         st.info("**📝 Modo manual** — Activa *Usar archivo .env* para usar el `.env` del repo.")
     
@@ -253,7 +333,7 @@ def main():
             status_placeholder = st.empty()
         with col2:
             st.subheader("Quick Info")
-            st.info(f"""
+            info_text = f"""
 **Dominio:** {DOMAIN_OPTIONS.get(config.domain, config.domain)}
 **Explore:** `{config.explore_model}`
 **Verify:** `{config.verify_model}`
@@ -262,7 +342,10 @@ def main():
 **Output:** `{config.output_dir}`
 **Collection:** `{config.collection}`
 **Seeds:** `{config.seeds_file}`
-""")
+"""
+            if use_env and config.pollination_model:
+                info_text += f"\n**LLM:** `{config.pollination_model}` (Pollination AI)"
+            st.info(info_text)
         
         run_clicked = st.button("🚀 Run Pipeline", type="primary",
                                 use_container_width=True)
@@ -280,10 +363,21 @@ def main():
                 return
             st.success(f"✅ {message}")
             
-            # Step 2: Load env vars from .env
+            # Step 2: Install deps (if not already done)
+            deps_status = st.session_state.get("deps_installed")
+            if deps_status is not True:
+                with st.spinner("📦 Installing project dependencies (rich, tiktoken, etc.)..."):
+                    deps_ok, deps_msg = install_project_deps(repo_path)
+                if deps_ok:
+                    st.success(f"✅ {deps_msg}")
+                    st.session_state.deps_installed = True
+                else:
+                    st.warning(f"⚠️ {deps_msg} — intentando continuar...")
+            
+            # Step 3: Load env vars from .env
             env_vars = load_env_file(repo_path)
             
-            # Show debug info so user can see what was loaded
+            # Show debug
             st.markdown("**🔍 Debug — Loaded env vars:**")
             if "__ERROR__" in env_vars:
                 st.error(env_vars["__ERROR__"])
@@ -292,15 +386,23 @@ def main():
                     display_val = v[:8] + "..." if len(v) > 8 else v
                     st.write(f"  `{k}` = `{display_val}`")
             
-            # Step 3: Validate
-            validation_errors = validate_api_keys_from_env(env_vars, config.domain)
+            # Step 4: Override for Pollination AI when .env mode
+            if use_env and config.pollination_model:
+                env_vars["OPENAI_API_BASE"] = "https://llm.pollination.ai"
+                env_vars["OPENAI_API_KEY"] = "not-needed"
+                # Don't need Anthropic with Pollination
+                env_vars.pop("ANTHROPIC_API_KEY", None)
+                st.success(f"🌸 Usando **Pollination AI** — modelo `{config.pollination_model}`")
+            
+            # Step 5: Validate
+            validation_errors = validate_api_keys_from_env(env_vars, config.domain, use_env)
             if validation_errors:
                 st.error("❌ **API Key Validation Failed:**")
                 for error in validation_errors:
                     st.write(f"• {error}")
                 return
             
-            # Step 4: Run
+            # Step 6: Run
             status_placeholder.info("🚀 Running pipeline...")
             with st.spinner("⚙️ Running..."):
                 success, message = run_pipeline(config, output_placeholder,
