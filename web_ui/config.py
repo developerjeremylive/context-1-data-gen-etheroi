@@ -49,16 +49,11 @@ class PipelineConfig:
     chroma_database: str = ""
     
     use_env_file: bool = False
-    pollination_model: str = ""  # e.g. "openai/gpt-oss-20b"
+    pollination_model: str = "openai/gpt-oss-20b"
 
 
 def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool = False) -> List[str]:
-    """
-    Validate required API keys from an env dict.
-    
-    When use_env_file=True and a pollination_model is set, we skip
-    Anthropic and OpenAI key validation (using Pollination AI instead).
-    """
+    """Validate required API keys from an env dict."""
     errors = []
     
     serper_key = env_vars.get("SERPER_API_KEY", "")
@@ -66,16 +61,6 @@ def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool =
     chroma_key = env_vars.get("CHROMA_API_KEY", "")
     chroma_db = env_vars.get("CHROMA_DATABASE", "")
     
-    # Using Pollination means no Anthropic/OpenAI needed for LLM
-    using_pollination = use_env_file and env_vars.get("OPENAI_API_BASE", "").startswith("https://gen.pollinations.ai")
-    
-    # Required for all domains when NOT using Pollination
-    if not using_pollination:
-        anthropic_key = env_vars.get("ANTHROPIC_API_KEY", "")
-        if not anthropic_key:
-            errors.append("Anthropic API key is required (unless using Pollination AI)")
-    
-    # Domain-specific (web domain needs Serper and Jina regardless of LLM provider)
     if domain == "web":
         if not serper_key:
             errors.append("Serper API key is required for web domain (serper.dev)")
@@ -86,19 +71,7 @@ def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool =
         if not chroma_db:
             errors.append("Chroma Database is required")
     
-    elif domain == "sec":
-        if not chroma_key:
-            errors.append("Chroma API key is required")
-        if not chroma_db:
-            errors.append("Chroma Database is required")
-    
-    elif domain == "patents":
-        if not chroma_key:
-            errors.append("Chroma API key is required")
-        if not chroma_db:
-            errors.append("Chroma Database is required")
-    
-    elif domain == "epstein":
+    elif domain in ("sec", "patents", "epstein"):
         if not chroma_key:
             errors.append("Chroma API key is required")
         if not chroma_db:
@@ -109,9 +82,8 @@ def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool =
 
 def build_command(config: PipelineConfig, repo_path: str = None) -> List[str]:
     """Build the command to run the pipeline."""
-    cmd = [
-        sys.executable,
-        "-m",
+    return [
+        sys.executable, "-m",
         f"agentic_search_data_gen.domains.{config.domain}",
         "--seeds", config.seeds_file,
         "--output", config.output_dir,
@@ -127,4 +99,3 @@ def build_command(config: PipelineConfig, repo_path: str = None) -> List[str]:
         "--extension-rounds", str(config.extension_rounds),
         "--max-workers", str(config.max_workers),
     ]
-    return cmd
