@@ -313,8 +313,6 @@ def get_pollination_client():
                 "from ...core.utils import get_anthropic_client, get_pollination_client"
             )
         # Patch client = get_anthropic_client() → use pollination client
-        patched = content.replace(
-            "client = get_anthropic_client()",
         if "def _get_llm_client():" not in content:
             helper_func = '''def _get_llm_client():
     """Get the LLM client: Pollination AI (free) or Baseten if API key is set."""
@@ -329,19 +327,7 @@ def get_pollination_client():
 
 
 '''
-            if "def _get_llm_client():
-    """Get the LLM client: Pollination AI (free) or Baseten if API key is set."""
-    import os, sys
-    baseten_key = os.getenv("BASETEN_API_KEY", "")
-    if baseten_key:
-        from openai import OpenAI
-        return OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
-    else:
-        from agentic_search_data_gen.domains.web.client_wrapper import get_pollination_client
-        return get_pollination_client()
-
-
-def main():" in content:
+            if "def main():" in content:
                 idx = content.find("def main():")
                 content = content[:idx] + helper_func + content[idx:]
         patched = content.replace(
