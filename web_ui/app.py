@@ -315,7 +315,7 @@ def get_pollination_client():
         # Patch client = get_anthropic_client() → use pollination client
         patched = content.replace(
             "client = get_anthropic_client()",
-            "from dotenv import load_dotenv\n    load_dotenv()\n    import os\n    baseten_key = os.getenv('BASETEN_API_KEY', '')\n    if baseten_key:\n        from openai import OpenAI\n        client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n    else:\n        client = get_pollination_client()"
+            "baseten_key = os.getenv('BASETEN_API_KEY', '')\n    if baseten_key:\n        from openai import OpenAI\n        client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n    else:\n        client = get_pollination_client()"
         )
         if patched != content:
             main_file.write_text(patched, encoding="utf-8")
@@ -327,7 +327,7 @@ def get_pollination_client():
         content = explore_file.read_text(encoding="utf-8")
         patched = content.replace(
             "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        client = get_anthropic_client()\n        super().__init__(client, model, max_iterations)",
-            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        from dotenv import load_dotenv\n        load_dotenv()\n        import os\n        baseten_key = os.getenv('BASETEN_API_KEY', '')\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n        else:\n            from ...core.utils import get_pollination_client\n            client = get_pollination_client()\n        super().__init__(client, model, max_iterations)"
+            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        baseten_key = os.getenv('BASETEN_API_KEY', '')\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n        else:\n            from .client_wrapper import get_pollination_client\n            client = get_pollination_client()\n        super().__init__(client, model, max_iterations)"
         )
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
