@@ -20,19 +20,6 @@ MODEL_OPTIONS = [
     "claude-3-opus-20240229",
 ]
 
-DEFAULT_CONFIG = {
-    "explore_model": "claude-sonnet-4-5",
-    "verify_model": "claude-opus-4-5",
-    "distract_model": "claude-sonnet-4-5",
-    "extend_model": "claude-sonnet-4-5",
-    "explore_max_iterations": 20,
-    "verify_max_retries": 3,
-    "distract_max_iterations": 15,
-    "extend_max_iterations": 20,
-    "extension_rounds": 0,
-    "max_workers": 8,
-}
-
 
 @dataclass
 class PipelineConfig:
@@ -62,7 +49,7 @@ class PipelineConfig:
     chroma_database: str = ""
     
     use_env_file: bool = False
-    pollination_model: str = ""  # e.g. "pollinationai/llama-3-70b-instruct"
+    pollination_model: str = ""  # e.g. "openai/gpt-oss-20b"
 
 
 def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool = False) -> List[str]:
@@ -70,33 +57,25 @@ def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool =
     Validate required API keys from an env dict.
     
     When use_env_file=True and a pollination_model is set, we skip
-    Anthropic and OpenAI validation (using Pollination AI instead).
+    Anthropic and OpenAI key validation (using Pollination AI instead).
     """
     errors = []
     
-    anthropic_key = env_vars.get("ANTHROPIC_API_KEY", "")
-    openai_key = env_vars.get("OPENAI_API_KEY", "")
     serper_key = env_vars.get("SERPER_API_KEY", "")
     jina_key = env_vars.get("JINA_API_KEY", "")
     chroma_key = env_vars.get("CHROMA_API_KEY", "")
     chroma_db = env_vars.get("CHROMA_DATABASE", "")
     
-    # Check if using Pollination AI (no Anthropic/OpenAI needed)
-    using_pollination = use_env_file and env_vars.get("OPENAI_API_BASE") == "https://llm.pollination.ai"
+    # Using Pollination means no Anthropic/OpenAI needed for LLM
+    using_pollination = use_env_file and env_vars.get("OPENAI_API_BASE", "").startswith("https://gen.pollinations.ai")
     
-    # Required for all domains — skip if using Pollination
-    if not anthropic_key and not using_pollination:
-        errors.append("Anthropic API key is required for all domains")
+    # Required for all domains when NOT using Pollination
+    if not using_pollination:
+        anthropic_key = env_vars.get("ANTHROPIC_API_KEY", "")
+        if not anthropic_key:
+            errors.append("Anthropic API key is required (unless using Pollination AI)")
     
-    # OpenAI only needed for embeddings — skip if using Pollination (still needed for embeddings)
-    # Actually, openai_key is still used for embeddings even with Pollination LLM.
-    # The user said "avoid using anthropic and openai models" so we keep openai for embeddings if needed.
-    # But let the user decide — if they're in .env mode and have the key, use it.
-    # If they explicitly want no API keys, they should use Pollination for LLM and 
-    # Chroma expects embeddings... this is complex.
-    # For now: if using Pollination AND no OPENAI_API_KEY, we warn but don't block.
-    # The pipeline can fail later if it really needs embeddings.
-    
+    # Domain-specific (web domain needs Serper and Jina regardless of LLM provider)
     if domain == "web":
         if not serper_key:
             errors.append("Serper API key is required for web domain (serper.dev)")
@@ -108,24 +87,18 @@ def validate_api_keys_from_env(env_vars: dict, domain: str, use_env_file: bool =
             errors.append("Chroma Database is required")
     
     elif domain == "sec":
-        if not openai_key and not using_pollination:
-            errors.append("OpenAI API key is required for SEC domain (embeddings)")
         if not chroma_key:
             errors.append("Chroma API key is required")
         if not chroma_db:
             errors.append("Chroma Database is required")
     
     elif domain == "patents":
-        if not openai_key and not using_pollination:
-            errors.append("OpenAI API key is required for patents domain (embeddings)")
         if not chroma_key:
             errors.append("Chroma API key is required")
         if not chroma_db:
             errors.append("Chroma Database is required")
     
     elif domain == "epstein":
-        if not openai_key and not using_pollination:
-            errors.append("OpenAI API key is required for email domain (embeddings)")
         if not chroma_key:
             errors.append("Chroma API key is required")
         if not chroma_db:
