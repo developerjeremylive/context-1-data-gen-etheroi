@@ -305,14 +305,7 @@ def get_pollination_client():
     main_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "__main__.py"
     if main_file.exists():
         content = main_file.read_text(encoding="utf-8")
-        # Add import for the client wrapper
-        if "from .client_wrapper import" not in content:
-            # Add at top of imports
-            content = content.replace(
-                "from ...core.utils import get_anthropic_client",
-                "from ...core.utils import get_anthropic_client, get_pollination_client"
-            )
-        # Patch client = get_anthropic_client() → use pollination client
+        # Always inject _get_llm_client helper before def main() (only if not present)
         if "def _get_llm_client():" not in content:
             helper_func = '''def _get_llm_client():
     """Get the LLM client: Pollination AI (free) or Baseten if API key is set."""
@@ -330,6 +323,7 @@ def get_pollination_client():
             if "def main():" in content:
                 idx = content.find("def main():")
                 content = content[:idx] + helper_func + content[idx:]
+        # Now do the replacement (always, even if helper was already there)
         patched = content.replace(
             "client = get_anthropic_client()",
             "client = _get_llm_client()"
