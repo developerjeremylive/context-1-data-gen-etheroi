@@ -49,24 +49,59 @@ def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
         # Delete and re-clone to ensure fresh patched files
         import shutil
         shutil.rmtree(repo_path, ignore_errors=True)
+    
+    # Use GIT_ASKPASS trick to avoid putting token in URL
+    # Write a temporary credential helper script
+    import tempfile as _tmp
+    cred_file = Path(_tmp.gettempdir()) / f"git_cred_{os.getpid()}.py"
+    cred_script = f'''#!/usr/bin/env python3
+import sys
+print("username=x-access-token")
+print("password={token}")
+'''
+    cred_file.write_text(cred_script, encoding="utf-8")
+    
     try:
-        clone_url = f"https://x-access-token:{token}@github.com/developerjeremylive/context-1-data-gen-etheroi.git"
-        subprocess.run(
+        clone_url = f"https://github.com/developerjeremylive/context-1-data-gen-etheroi.git"
+        env = os.environ.copy()
+        env["GIT_ASKPASS"] = str(cred_file)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        result = subprocess.run(
             ["git", "clone", "--branch", "web-ui", clone_url, str(repo_path)],
-            check=True, capture_output=True, text=True,
+            check=True, capture_output=True, text=True, env=env, timeout=120,
         )
         return True, f"Cloned web-ui branch to {repo_path}", repo_path
     except subprocess.CalledProcessError:
-        # Fallback: clone then switch branch
-        subprocess.run(
-            ["git", "clone", clone_url, str(repo_path)],
-            check=True, capture_output=True, text=True,
-        )
-        subprocess.run(
-            ["git", "checkout", "web-ui"],
-            cwd=str(repo_path), capture_output=True, text=True,
-        )
-        return True, f"Cloned and switched to web-ui: {repo_path}", repo_path
+        # Fallback: try with credential.helper
+        try:
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            subprocess.run(
+                ["git", "config", "--global", "credential.helper",
+                 f"!python -c \"import sys; print('username=x-access-token\\npassword={token}')\""],
+                capture_output=True, text=True, timeout=10,
+            )
+            result = subprocess.run(
+                ["git", "clone", "--branch", "web-ui", f"https://github.com/developerjeremylive/context-1-data-gen-etheroi.git", str(repo_path)],
+                check=True, capture_output=True, text=True, env=env, timeout=120,
+            )
+            return True, f"Cloned web-ui via credential.helper: {repo_path}", repo_path
+        except Exception:
+            # Last resort: direct URL with encoded token
+            encoded_token = token.replace("%", "%25").replace("@", "%40")
+            result = subprocess.run(
+                ["git", "clone", "--branch", "web-ui",
+                 f"https://x-access-token:{encoded_token}@github.com/developerjeremylive/context-1-data-gen-etheroi.git",
+                 str(repo_path)],
+                check=True, capture_output=True, text=True, timeout=120,
+            )
+            return True, f"Cloned web-ui (encoded token): {repo_path}", repo_path
+    finally:
+        # Clean up cred file
+        try:
+            cred_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def find_venv_python(repo_path: Path) -> tuple[str, list[str]]:
