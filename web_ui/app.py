@@ -112,26 +112,43 @@ def patch_pipeline_for_baseten(repo_path: Path) -> tuple[bool, str]:
     """
     patches = []
     
+    # ─── Patch core/utils.py — add get_baseten_client ────────────────────────
+    utils_file = repo_path / "agentic_search_data_gen" / "core" / "utils.py"
+    if utils_file.exists():
+        content = utils_file.read_text(encoding="utf-8")
+        # Add get_baseten_client after get_anthropic_client
+        if "def get_baseten_client():" not in content:
+            baseten_func = '''
+def get_baseten_client():
+    """Get OpenAI-compatible client for Baseten API."""
+    from openai import OpenAI
+    return OpenAI(api_key=os.getenv("BASETEN_API_KEY"), base_url="https://app.baseten.co")
+'''
+            # Insert after get_anthropic_client
+            if "def get_anthropic_client():" in content:
+                idx = content.find("def get_anthropic_client():")
+                content = content[:idx] + baseten_func + content[idx:]
+            elif "def count_tokens" in content:
+                idx = content.find("def count_tokens")
+                content = content[:idx] + baseten_func + content[idx:]
+            utils_file.write_text(content, encoding="utf-8")
+            patches.append("  ✓ Patched core/utils.py (added get_baseten_client)")
+    
     # ─── Patch __main__.py ──────────────────────────────────────────────────
     main_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "__main__.py"
     if main_file.exists():
         content = main_file.read_text(encoding="utf-8")
-        # Change: from ...core.utils import get_anthropic_client
-        # To: check for BASETEN_API_KEY and use OpenAI client instead
         patched = content.replace(
             "from ...core.utils import get_anthropic_client",
             "from ...core.utils import get_anthropic_client, get_baseten_client"
         )
-        # Patch the verifier creation in __main__.py
-        # Original: client = get_anthropic_client()  # in Stage 2 Verify
-        # We need to add logic after get_anthropic_client() usage
         patched = patched.replace(
             "client = get_anthropic_client()",
             "from dotenv import load_dotenv\n    load_dotenv()\n    baseten_key = os.getenv('BASETEN_API_KEY', '')\n    if baseten_key:\n        from openai import OpenAI\n        client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n    else:\n        client = get_anthropic_client()"
         )
         if patched != content:
             main_file.write_text(patched, encoding="utf-8")
-            patches.append(f"  ✓ Patched __main__.py")
+            patches.append("  ✓ Patched __main__.py")
     
     # ─── Patch explore.py ────────────────────────────────────────────────────
     explore_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "explore.py"
