@@ -433,7 +433,7 @@ def get_pollination_client():
         # Now do the replacement (always, even if helper was already there)
         patched = content.replace(
             "client = get_anthropic_client()",
-            "client = _get_llm_client()"
+            "client = _get_llm_client()\n    print(f\"[DEBUG __main__] Client type: {type(client).__name__}, model: {getattr(client, 'model', 'unknown')}\")"
         )
         if patched != content:
             main_file.write_text(patched, encoding="utf-8")
@@ -445,7 +445,7 @@ def get_pollination_client():
         content = explore_file.read_text(encoding="utf-8")
         patched = content.replace(
             "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        client = get_anthropic_client()\n        super().__init__(client, model, max_iterations)",
-            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        baseten_key = os.getenv('BASETEN_API_KEY', '')\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n        else:\n            from .client_wrapper import get_pollination_client\n            client = get_pollination_client()\n        super().__init__(client, model, max_iterations)"
+            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        baseten_key = sys.modules[\"os\"].getenv(\"BASETEN_API_KEY\", \"\")\n        print(f\"[DEBUG explore.py] BASETEN_API_KEY from env = '{baseten_key}'\")\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url=\"https://app.baseten.co\")\n        else:\n            from .client_wrapper import get_pollination_client\n            client = get_pollination_client()\n        print(f\"[DEBUG explore.py] Client type: {type(client).__name__}\")\n        super().__init__(client, model, max_iterations)"
         )
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
@@ -635,6 +635,10 @@ def run_pipeline(config: PipelineConfig, output_placeholder, status_placeholder,
     if os.name == "nt":
         clean_env["PYTHONIOENCODING"] = "utf-8"
         clean_env["PYTHONUTF8"] = "1"
+
+    # In Pollination mode, explicitly remove Baseten key so load_dotenv() in explore.py can't find it
+    clean_env.pop("BASETEN_API_KEY", None)
+    clean_env.pop("ANTHROPIC_API_KEY", None)
 
     cmd = [
         python_exe, "-m",
