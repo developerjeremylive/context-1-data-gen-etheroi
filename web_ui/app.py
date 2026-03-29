@@ -46,16 +46,37 @@ def load_env_file(repo_path: Path) -> dict:
 def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
     repo_path = get_repo_path()
     if repo_path.exists():
-        return True, f"Repository already exists at {repo_path}", repo_path
+        # Always pull latest from web-ui to get fresh patched files
+        try:
+            subprocess.run(
+                ["git", "checkout", "web-ui"],
+                cwd=str(repo_path), capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["git", "pull", "origin", "web-ui"],
+                cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+            )
+            return True, f"Repository updated (pulled web-ui): {repo_path}", repo_path
+        except Exception:
+            return True, f"Using existing repo at {repo_path}", repo_path
     try:
         clone_url = f"https://x-access-token:{token}@github.com/developerjeremylive/context-1-data-gen-etheroi.git"
+        subprocess.run(
+            ["git", "clone", "--branch", "web-ui", clone_url, str(repo_path)],
+            check=True, capture_output=True, text=True,
+        )
+        return True, f"Cloned web-ui branch to {repo_path}", repo_path
+    except subprocess.CalledProcessError:
+        # Fallback: clone then switch branch
         subprocess.run(
             ["git", "clone", clone_url, str(repo_path)],
             check=True, capture_output=True, text=True,
         )
-        return True, f"Successfully cloned to {repo_path}", repo_path
-    except subprocess.CalledProcessError as e:
-        return False, f"Failed to clone: {e.stderr}", repo_path
+        subprocess.run(
+            ["git", "checkout", "web-ui"],
+            cwd=str(repo_path), capture_output=True, text=True,
+        )
+        return True, f"Cloned and switched to web-ui: {repo_path}", repo_path
 
 
 def find_venv_python(repo_path: Path) -> tuple[str, list[str]]:
