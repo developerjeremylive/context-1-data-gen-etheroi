@@ -93,8 +93,12 @@ def load_env_file(repo_path: Path) -> dict:
     return env_vars
 
 
-def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
+def clone_repo_if_needed(token: str, force_reclone: bool = True) -> tuple[bool, str, Path]:
     repo_path = get_repo_path()
+    
+    if repo_path.exists() and not force_reclone:
+        return True, f"Using existing repository at {repo_path}", repo_path
+    
     if repo_path.exists():
         # Delete and re-clone to ensure fresh patched files
         import shutil
@@ -673,9 +677,12 @@ def get_generated_files(output_dir: str) -> list[str]:
 
 # ─── Session state init ────────────────────────────────────────────────────────
 def _init_state():
-    for key in ["use_env_file", "deps_info"]:
+    for key in ["use_env_file", "deps_info", "force_reclone"]:
         if key not in st.session_state:
-            st.session_state[key] = None
+            if key == "force_reclone":
+                st.session_state[key] = True
+            else:
+                st.session_state[key] = None
 
 
 _init_state()
@@ -704,6 +711,13 @@ def main():
         st.sidebar.caption("📝 Ingresa las API keys manualmente abajo.")
 
     st.sidebar.markdown("### 🔑 GitHub")
+    force_reclone = st.sidebar.toggle(
+        "Re-clonar proyecto (sobrescribir)",
+        value=True,
+        help="Cuando está activo: descarga el proyecto fresco desde GitHub cada vez, borrando la versión anterior. "
+             "Cuando está desactivado: usa el proyecto existente en Temp si ya está descargado.",
+    )
+    st.session_state.force_reclone = force_reclone
     github_token = st.sidebar.text_input("GitHub Token", type="password",
         help="Token PAT para clonar el repositorio", placeholder="ghp_...")
 
@@ -812,7 +826,7 @@ def main():
 
             # Step 1: Clone
             with st.spinner("📦 Cloning repository..."):
-                success, message, repo_path = clone_repo_if_needed(github_token)
+                success, message, repo_path = clone_repo_if_needed(github_token, force_reclone)
             if not success:
                 st.error(f"❌ {message}")
                 return
