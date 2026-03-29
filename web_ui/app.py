@@ -46,19 +46,9 @@ def load_env_file(repo_path: Path) -> dict:
 def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
     repo_path = get_repo_path()
     if repo_path.exists():
-        # Always pull latest from web-ui to get fresh patched files
-        try:
-            subprocess.run(
-                ["git", "checkout", "web-ui"],
-                cwd=str(repo_path), capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["git", "pull", "origin", "web-ui"],
-                cwd=str(repo_path), capture_output=True, text=True, timeout=30,
-            )
-            return True, f"Repository updated (pulled web-ui): {repo_path}", repo_path
-        except Exception:
-            return True, f"Using existing repo at {repo_path}", repo_path
+        # Delete and re-clone to ensure fresh patched files
+        import shutil
+        shutil.rmtree(repo_path, ignore_errors=True)
     try:
         clone_url = f"https://x-access-token:{token}@github.com/developerjeremylive/context-1-data-gen-etheroi.git"
         subprocess.run(
