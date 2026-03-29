@@ -40,6 +40,16 @@ Each domain has its own pipeline command and README with full documentation:
 - [Patents](agentic_search_data_gen/domains/patents/README.md) — patent prior-art tasks
 - [Email (Epstein)](agentic_search_data_gen/domains/epstein/README.md) — email search tasks
 
+## Web UI
+
+A graphical interface is available for running the pipeline. See [README_WEB_UI.md](README_WEB_UI.md) for setup instructions and usage.
+
+Features:
+- Visual configuration of all pipeline parameters
+- Real-time streaming output during pipeline execution
+- Results viewer for generated JSON files
+- Multi-domain support (Web, SEC, Patents, Email)
+
 ## Project structure
 
 ```
