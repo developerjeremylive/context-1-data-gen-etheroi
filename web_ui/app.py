@@ -316,8 +316,8 @@ def get_pollination_client():
         if "def _get_llm_client():" not in content:
             helper_func = '''def _get_llm_client():
     """Get the LLM client: Pollination AI (free) or Baseten if API key is set."""
-    import os, sys
-    baseten_key = os.getenv("BASETEN_API_KEY", "")
+    import sys
+    baseten_key = sys.modules["os"].getenv("BASETEN_API_KEY", "")
     if baseten_key:
         from openai import OpenAI
         return OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
