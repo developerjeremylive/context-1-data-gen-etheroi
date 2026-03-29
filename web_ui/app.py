@@ -6,19 +6,16 @@ import os
 import sys
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
-from typing import Optional
 
 import streamlit as st
 
 from config import (
-    DEFAULT_CONFIG,
     DOMAIN_OPTIONS,
     MODEL_OPTIONS,
     PipelineConfig,
     build_command,
-    validate_api_keys,
+    validate_api_keys_from_env,
 )
 
 
@@ -46,15 +43,14 @@ def load_env_file(repo_path: Path) -> dict:
     return env_vars
 
 
-def clone_repo_if_needed(token: str) -> tuple[bool, str]:
+def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
     """Clone the repository if it doesn't exist locally."""
     repo_path = get_repo_path()
     
     if repo_path.exists():
-        return True, f"Repository already exists at {repo_path}"
+        return True, f"Repository already exists at {repo_path}", repo_path
     
     try:
-        # Use HTTPS with token for authentication
         clone_url = f"https://x-access-token:{token}@github.com/developerjeremylive/context-1-data-gen-etheroi.git"
         subprocess.run(
             ["git", "clone", clone_url, str(repo_path)],
@@ -62,31 +58,25 @@ def clone_repo_if_needed(token: str) -> tuple[bool, str]:
             capture_output=True,
             text=True,
         )
-        return True, f"Successfully cloned repository to {repo_path}"
+        return True, f"Successfully cloned repository to {repo_path}", repo_path
     except subprocess.CalledProcessError as e:
-        return False, f"Failed to clone repository: {e.stderr}"
+        return False, f"Failed to clone repository: {e.stderr}", repo_path
 
 
 def run_pipeline(
     config: PipelineConfig,
     output_placeholder,
     status_placeholder,
-    use_env_file: bool = False,
+    env: dict,
 ) -> tuple[bool, str]:
-    """Run the pipeline with the given configuration."""
+    """Run the pipeline with the given environment."""
     repo_path = get_repo_path()
     
-    # Set PYTHONPATH to include the repo directory
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_path)
+    # Set PYTHONPATH and merge env
+    full_env = os.environ.copy()
+    full_env["PYTHONPATH"] = str(repo_path)
+    full_env.update(env)
     
-    # Load .env file if option is enabled
-    if use_env_file:
-        env_from_file = load_env_file(repo_path)
-        for key, value in env_from_file.items():
-            env[key] = value
-    
-    # Build and run the command
     cmd = build_command(config, str(repo_path))
     
     try:
@@ -95,7 +85,7 @@ def run_pipeline(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=str(repo_path),
-            env=env,
+            env=full_env,
             text=True,
             bufsize=1,
         )
@@ -124,12 +114,8 @@ def get_generated_files(output_dir: str) -> list[str]:
     return [f.name for f in output_path.glob("*.json")]
 
 
-def render_sidebar() -> tuple[str, PipelineConfig, bool]:
-    """Render the sidebar configuration and return the config.
-    
-    Returns:
-        Tuple of (github_token, config, use_env_file)
-    """
+def render_sidebar() -> tuple[str, PipelineConfig]:
+    """Render the sidebar configuration and return the config."""
     
     st.sidebar.title("🔍 Configuration")
     
@@ -145,8 +131,6 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
     if use_env_file:
         st.sidebar.caption(
             "✅ Cargando keys desde `.env` — campos ocultos.",
-            help="Las siguientes variables se usan: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
-                 "SERPER_API_KEY, JINA_API_KEY, CHROMA_API_KEY, CHROMA_DATABASE",
         )
     else:
         st.sidebar.caption("📝 Ingresa las API keys manualmente abajo.")
@@ -156,7 +140,7 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
     github_token = st.sidebar.text_input(
         "GitHub Token",
         type="password",
-        help="Token PAT para clonar el repositorio (solo lectura está bien)",
+        help="Token PAT para clonar el repositorio",
         placeholder="ghp_...",
     )
     
@@ -272,7 +256,7 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
         anthropic_api_key = st.sidebar.text_input(
             "Anthropic API Key",
             type="password",
-            help="Requerido para todos los dominios (console.anthropic.com)",
+            help="Requerido para todos los dominios",
             placeholder="sk-ant-...",
         )
         
@@ -286,14 +270,14 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
         serper_api_key = st.sidebar.text_input(
             "Serper API Key",
             type="password",
-            help="Requerido para dominio web (serper.dev)",
+            help="Requerido para dominio web",
             placeholder="...",
         )
         
         jina_api_key = st.sidebar.text_input(
             "Jina API Key",
             type="password",
-            help="Requerido para dominio web (jina.ai)",
+            help="Requerido para dominio web",
             placeholder="...",
         )
         
@@ -311,7 +295,6 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
             placeholder="...",
         )
     else:
-        # Hidden but present (empty strings — validation reads from env)
         anthropic_api_key = ""
         openai_api_key = ""
         serper_api_key = ""
@@ -345,7 +328,7 @@ def render_sidebar() -> tuple[str, PipelineConfig, bool]:
         use_env_file=use_env_file,
     )
     
-    return github_token, config, use_env_file
+    return github_token, config
 
 
 def main():
@@ -360,19 +343,18 @@ def main():
     st.markdown("Generate synthetic multi-hop search tasks across multiple domains")
     
     # Render sidebar and get config
-    github_token, config, use_env_file = render_sidebar()
+    github_token, config = render_sidebar()
     
-    # ─── Env file status banner ─────────────────────────────────────────────
-    if use_env_file:
+    # Mode banner
+    if config.use_env_file:
         st.success(
             "**🔐 Modo .env activo** — Las API keys se leen del archivo `.env` "
             "en el repositorio. Los campos de keys fueron ocultados del menú."
         )
     else:
         st.info(
-            "**📝 Modo manual** — Ingresa las API keys en el menú izquierdo. "
-            "Alternativamente, activa el toggle *Usar archivo .env* para leerlas "
-            "desde el archivo `.env` del repositorio."
+            "**📝 Modo manual** — Ingresa las API keys en el menú izquierdo, "
+            "o activa *Usar archivo .env* para leerlas desde el `.env` del repositorio."
         )
     
     # Main content area with tabs
@@ -391,10 +373,10 @@ def main():
             st.info(f"""
 **Dominio:** {DOMAIN_OPTIONS.get(config.domain, config.domain)}
 
-**Modelo Explore:** `{config.explore_model}`
-**Modelo Verify:** `{config.verify_model}`
-**Modelo Distract:** `{config.distract_model}`
-**Modelo Extend:** `{config.extend_model}`
+**Explore:** `{config.explore_model}`
+**Verify:** `{config.verify_model}`
+**Distract:** `{config.distract_model}`
+**Extend:** `{config.extend_model}`
 
 **Output:** `{config.output_dir}`
 **Collection:** `{config.collection}`
@@ -402,7 +384,6 @@ def main():
 **Seeds:** `{config.seeds_file}`
 """)
         
-        # Run Button
         run_clicked = st.button(
             "🚀 Run Pipeline",
             type="primary",
@@ -411,32 +392,50 @@ def main():
         
         if run_clicked:
             if not github_token:
-                st.error("⚠️ Ingresa tu GitHub Token en el menú izquierdo para clonar el repositorio.")
+                st.error("⚠️ Ingresa tu GitHub Token en el menú izquierdo.")
                 return
             
-            # Validate API keys
-            validation_errors = validate_api_keys(config)
+            # ── Step 1: Clone repo first (needed to read .env) ───────────────
+            with st.spinner("📦 Cloning repository..."):
+                success, message, repo_path = clone_repo_if_needed(github_token)
+                if not success:
+                    st.error(f"❌ {message}")
+                    return
+                st.success(f"✅ {message}")
+            
+            # ── Step 2: Load env vars ──────────────────────────────────────────
+            if config.use_env_file:
+                env_vars = load_env_file(repo_path)
+            else:
+                # Build env from manual inputs
+                env_vars = {}
+                if config.anthropic_api_key:
+                    env_vars["ANTHROPIC_API_KEY"] = config.anthropic_api_key
+                if config.openai_api_key:
+                    env_vars["OPENAI_API_KEY"] = config.openai_api_key
+                if config.serper_api_key:
+                    env_vars["SERPER_API_KEY"] = config.serper_api_key
+                if config.jina_api_key:
+                    env_vars["JINA_API_KEY"] = config.jina_api_key
+                if config.chroma_api_key:
+                    env_vars["CHROMA_API_KEY"] = config.chroma_api_key
+                if config.chroma_database:
+                    env_vars["CHROMA_DATABASE"] = config.chroma_database
+            
+            # ── Step 3: Validate with loaded env vars ─────────────────────────
+            validation_errors = validate_api_keys_from_env(env_vars, config.domain)
             if validation_errors:
                 st.error("❌ **API Key Validation Failed:**")
                 for error in validation_errors:
                     st.write(f"• {error}")
                 return
             
-            # Clone repo if needed
-            with st.spinner("📦 Cloning repository..."):
-                success, message = clone_repo_if_needed(github_token)
-                if not success:
-                    st.error(f"❌ Failed to clone repository: {message}")
-                    return
-                st.success(f"✅ {message}")
+            # ── Step 4: Run pipeline ──────────────────────────────────────────
+            status_placeholder.info("🚀 Running pipeline...")
             
-            # Run pipeline
-            status_placeholder.info("🚀 Running pipeline... This may take a while.")
-            
-            with st.spinner("⚙️ Running pipeline..."):
+            with st.spinner("⚙️ Running..."):
                 success, message = run_pipeline(
-                    config, output_placeholder, status_placeholder,
-                    use_env_file=use_env_file,
+                    config, output_placeholder, status_placeholder, env_vars
                 )
             
             if success:
@@ -447,10 +446,7 @@ def main():
     with tab2:
         st.subheader("Generated Files")
         
-        output_dir = config.output_dir if config.output_dir else "output"
-        
-        # Check if output directory exists
-        output_path = get_repo_path() / output_dir
+        output_path = get_repo_path() / config.output_dir
         
         if output_path.exists():
             files = get_generated_files(str(output_path))
@@ -459,7 +455,7 @@ def main():
                 col_m1, col_m2, col_m3 = st.columns(3)
                 col_m1.metric("Total Tasks", len(files))
                 col_m2.metric("Domain", config.domain.upper())
-                col_m3.metric("Output Dir", output_dir)
+                col_m3.metric("Output Dir", config.output_dir)
                 
                 st.markdown("---")
                 
@@ -469,8 +465,7 @@ def main():
                         try:
                             import json
                             with open(file_path) as f:
-                                content = json.load(f)
-                            st.json(content)
+                                st.json(json.load(f))
                         except Exception as e:
                             st.error(f"Error reading file: {e}")
             else:
