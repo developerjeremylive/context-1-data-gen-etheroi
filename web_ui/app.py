@@ -147,8 +147,9 @@ def run_pipeline(
     repo_path = get_repo_path()
     
     # Build env: start fresh, set PYTHONPATH to include venv site-packages
+    # Preserve HOME/APPDATA for chromadb
     clean_env = {}
-    for key in ["PATH", "SYSTEMROOT", "TEMP", "TMP"]:
+    for key in ["PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]:
         if key in os.environ:
             clean_env[key] = os.environ[key]
     
@@ -295,19 +296,26 @@ def main():
     output_dir = st.sidebar.text_input("Output Directory", value="output")
     collection = st.sidebar.text_input("ChromaDB Collection", value="context1-data")
     
-    # Models (for non-.env or as override)
-    st.sidebar.markdown("### 🤖 Modelos")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        explore_model = st.selectbox("Explore", options=MODEL_OPTIONS,
-            index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
-        distract_model = st.selectbox("Distract", options=MODEL_OPTIONS,
-            index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
-    with col2:
-        verify_model = st.selectbox("Verify", options=MODEL_OPTIONS,
-            index=MODEL_OPTIONS.index("claude-opus-4-5"))
-        extend_model = st.selectbox("Extend", options=MODEL_OPTIONS,
-            index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
+    # Models (for non-.env mode only; .env mode uses Pollination AI fixed)
+    if not use_env:
+        st.sidebar.markdown("### 🤖 Modelos")
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            explore_model = st.selectbox("Explore", options=MODEL_OPTIONS,
+                index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
+            distract_model = st.selectbox("Distract", options=MODEL_OPTIONS,
+                index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
+        with col2:
+            verify_model = st.selectbox("Verify", options=MODEL_OPTIONS,
+                index=MODEL_OPTIONS.index("claude-opus-4-5"))
+            extend_model = st.selectbox("Extend", options=MODEL_OPTIONS,
+                index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
+    else:
+        # Fixed: Pollination AI openai/gpt-oss-20b for all stages
+        explore_model = "openai/gpt-oss-20b"
+        verify_model = "openai/gpt-oss-20b"
+        distract_model = "openai/gpt-oss-20b"
+        extend_model = "openai/gpt-oss-20b"
     
     # Limits
     st.sidebar.markdown("### 🔄 Límites")
