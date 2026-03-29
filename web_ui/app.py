@@ -142,6 +142,8 @@ def run_pipeline(
     env: dict,
     python_exe: str,
     extra_python_paths: list[str],
+    use_env: bool = False,
+    pollination_model: str = "",
 ) -> tuple[bool, str]:
     """Run the pipeline with the given environment and Python paths."""
     repo_path = get_repo_path()
@@ -157,11 +159,21 @@ def run_pipeline(
     for sp in extra_python_paths:
         clean_env["PYTHONPATH"] += os.pathsep + sp
     
+    # When using Pollination AI: remove Anthropic/OpenAI keys from env BEFORE update
+    # so the pipeline doesn't find them and fall back to them
+    if use_env and pollination_model:
+        for key_to_remove in ["ANTHROPIC_API_KEY", "BASETEN_API_KEY"]:
+            env.pop(key_to_remove, None)
+    
     clean_env.update(env)
     
     # Remove empty env vars
     for key in [k for k, v in clean_env.items() if not v]:
         del clean_env[key]
+    
+    # Force UTF-8 encoding for Rich on Windows
+    if os.name == "nt":
+        clean_env["PYTHONIOENCODING"] = "utf-8"
     
     # Use the venv python
     cmd = [
@@ -458,6 +470,7 @@ def main():
                 success, message = run_pipeline(
                     config, output_placeholder, status_placeholder,
                     env_vars, python_exe, sp_paths,
+                    use_env=use_env, pollination_model=pollination_model or "openai/gpt-oss-20b",
                 )
             if success:
                 status_placeholder.success(f"✅ {message}")
