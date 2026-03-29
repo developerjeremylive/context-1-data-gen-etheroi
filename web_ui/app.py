@@ -62,77 +62,113 @@ def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
 
 
 def find_venv_python(repo_path: Path) -> tuple[str, list[str]]:
-    """
-    Find the Python executable and site-packages in the repo's venv.
-    Returns (python_executable, site_packages_paths).
-    """
-    # Common venv locations
+    """Find the Python executable and site-packages in the repo's venv."""
     for venv_name in [".venv", "venv", ".venv37"]:
         venv_path = repo_path / venv_name
         if venv_path.exists():
-            # Windows: Scripts/python.exe, Linux/Mac: bin/python
             for exe_name in ["python.exe", "python3.exe", "python"]:
                 python_exe = venv_path / ("Scripts" if os.name == "nt" else "bin") / exe_name
                 if python_exe.exists():
-                    # Get site-packages
-                    sp_paths = subprocess.run(
-                        [str(python_exe), "-c",
-                         "import site; print('|'.join(site.getsitepackages()))"],
+                    sp_result = subprocess.run(
+                        [str(python_exe), "-c", "import site; print('|'.join(site.getsitepackages()))"],
                         capture_output=True, text=True,
                     )
-                    if sp_paths.returncode == 0:
-                        paths = sp_paths.stdout.strip().split("|")
-                        return str(python_exe), paths
+                    if sp_result.returncode == 0:
+                        return str(python_exe), sp_result.stdout.strip().split("|")
     
-    # Fallback: use current python but add repo .venv site-packages manually
     current_python = sys.executable
-    # uv creates .venv in repo, add its site-packages
     venv_sp = repo_path / ".venv" / ("lib" if os.name != "nt" else "Lib") / "site-packages"
     if venv_sp.exists():
         return current_python, [str(venv_sp)]
-    
     return current_python, []
 
 
 def install_project_deps(repo_path: Path) -> tuple[bool, str, str, list[str]]:
-    """
-    Install project dependencies using uv.
-    Returns (success, message, python_executable, site_packages_paths).
-    Uses the repo's .venv python so packages are findable.
-    """
-    # First try uv sync
+    """Install project dependencies using uv."""
     result = subprocess.run(
         ["uv", "sync", "--all-extras"],
-        cwd=str(repo_path), capture_output=True, text=True,
-        timeout=180,
+        cwd=str(repo_path), capture_output=True, text=True, timeout=180,
     )
-    
     if result.returncode == 0:
         python_exe, sp_paths = find_venv_python(repo_path)
         return True, "Dependencies installed via uv sync", python_exe, sp_paths
     
-    # Fallback: pip install into repo's venv
     python_exe, sp_paths = find_venv_python(repo_path)
-    if not sp_paths:
-        # No venv found, create one
-        venv_result = subprocess.run(
-            ["uv", "venv", str(repo_path / ".venv")],
-            cwd=str(repo_path), capture_output=True, text=True,
-            timeout=60,
-        )
-        if venv_result.returncode == 0:
-            python_exe, sp_paths = find_venv_python(repo_path)
-    
     result = subprocess.run(
         [python_exe, "-m", "pip", "install", "-e", ".[all]"],
-        cwd=str(repo_path), capture_output=True, text=True,
-        timeout=300,
+        cwd=str(repo_path), capture_output=True, text=True, timeout=300,
     )
-    
     if result.returncode == 0:
         return True, "Dependencies installed via pip", python_exe, sp_paths
-    
     return False, f"Failed to install deps: {result.stderr[-500:]}", python_exe, sp_paths
+
+
+def patch_pipeline_for_baseten(repo_path: Path) -> tuple[bool, str]:
+    """
+    Patch the pipeline modules to use Baseten (OpenAI-compatible) instead of Anthropic
+    when BASETEN_API_KEY is present in the .env file.
+    
+    Baseten provides gpt-oss-20b and other models via OpenAI-compatible API.
+    """
+    patches = []
+    
+    # ─── Patch __main__.py ──────────────────────────────────────────────────
+    main_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "__main__.py"
+    if main_file.exists():
+        content = main_file.read_text(encoding="utf-8")
+        # Change: from ...core.utils import get_anthropic_client
+        # To: check for BASETEN_API_KEY and use OpenAI client instead
+        patched = content.replace(
+            "from ...core.utils import get_anthropic_client",
+            "from ...core.utils import get_anthropic_client, get_baseten_client"
+        )
+        # Patch the verifier creation in __main__.py
+        # Original: client = get_anthropic_client()  # in Stage 2 Verify
+        # We need to add logic after get_anthropic_client() usage
+        patched = patched.replace(
+            "client = get_anthropic_client()",
+            "from dotenv import load_dotenv\n    load_dotenv()\n    baseten_key = os.getenv('BASETEN_API_KEY', '')\n    if baseten_key:\n        from openai import OpenAI\n        client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n    else:\n        client = get_anthropic_client()"
+        )
+        if patched != content:
+            main_file.write_text(patched, encoding="utf-8")
+            patches.append(f"  ✓ Patched __main__.py")
+    
+    # ─── Patch explore.py ────────────────────────────────────────────────────
+    explore_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "explore.py"
+    if explore_file.exists():
+        content = explore_file.read_text(encoding="utf-8")
+        # Change client = get_anthropic_client() in __init__
+        patched = content.replace(
+            "from ...core.utils import get_anthropic_client, strip_links",
+            "from ...core.utils import get_anthropic_client, strip_links, get_baseten_client"
+        )
+        patched = patched.replace(
+            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        client = get_anthropic_client()\n        super().__init__(client, model, max_iterations)",
+            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        from dotenv import load_dotenv\n        load_dotenv()\n        baseten_key = os.getenv('BASETEN_API_KEY', '')\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url='https://app.baseten.co')\n        else:\n            client = get_anthropic_client()\n        super().__init__(client, model, max_iterations)"
+        )
+        if patched != content:
+            explore_file.write_text(patched, encoding="utf-8")
+            patches.append(f"  ✓ Patched explore.py")
+    
+    # ─── Patch verify.py ────────────────────────────────────────────────────
+    verify_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "verify.py"
+    if verify_file.exists():
+        content = verify_file.read_text(encoding="utf-8")
+        patched = content.replace(
+            "from ...core.utils import (\n    count_matching_quotes,\n    min_required_matches,\n    parse_quotes,\n    get_anthropic_client\n)",
+            "from ...core.utils import (\n    count_matching_quotes,\n    min_required_matches,\n    parse_quotes,\n    get_anthropic_client,\n    get_baseten_client\n)"
+        )
+        # Patch run_single_item_extraction in verify.py
+        # Find the method and add baseten client detection
+        patched = patched.replace(
+            "def get_anthropic_client():",
+            "def get_baseten_client():\n    from openai import OpenAI\n    import os\n    return OpenAI(api_key=os.getenv('BASETEN_API_KEY'), base_url='https://app.baseten.co')\n\ndef get_anthropic_client():"
+        )
+        if patched != content:
+            verify_file.write_text(patched, encoding="utf-8")
+            patches.append(f"  ✓ Patched verify.py (added get_baseten_client)")
+    
+    return True, "\n".join(patches) if patches else "No patches needed (files not found)"
 
 
 def run_pipeline(
@@ -148,8 +184,6 @@ def run_pipeline(
     """Run the pipeline with the given environment and Python paths."""
     repo_path = get_repo_path()
     
-    # Build env: start fresh, set PYTHONPATH to include venv site-packages
-    # Preserve HOME/APPDATA for chromadb
     clean_env = {}
     for key in ["PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]:
         if key in os.environ:
@@ -159,23 +193,16 @@ def run_pipeline(
     for sp in extra_python_paths:
         clean_env["PYTHONPATH"] += os.pathsep + sp
     
-    # When using Pollination AI: remove Anthropic/OpenAI keys from env BEFORE update
-    # so the pipeline doesn't find them and fall back to them
-    if use_env and pollination_model:
-        for key_to_remove in ["ANTHROPIC_API_KEY", "BASETEN_API_KEY"]:
-            env.pop(key_to_remove, None)
-    
     clean_env.update(env)
     
-    # Remove empty env vars
     for key in [k for k, v in clean_env.items() if not v]:
         del clean_env[key]
     
-    # Force UTF-8 encoding for Rich on Windows
+    # Force UTF-8 encoding for all output on Windows
     if os.name == "nt":
         clean_env["PYTHONIOENCODING"] = "utf-8"
+        clean_env["PYTHONUTF8"] = "1"
     
-    # Use the venv python
     cmd = [
         python_exe,
         "-m",
@@ -234,16 +261,6 @@ def _init_state():
 _init_state()
 
 
-# ─── Pollination AI models ─────────────────────────────────────────────────────
-POLLINATION_MODELS = {
-    "openai-fast (gpt-oss-20b)": "openai/gpt-oss-20b",
-    "Mistral 7B": "mistralai/mistral-7b-instruct",
-    "Qwen 2.5 72B": "qwen/qwen-2.5-72b-instruct",
-    "DeepSeek V3": "deepseek-ai/DeepSeek-V3-0324",
-    "Llama 3.1 70B": "meta-llama/llama-3.1-70b-instruct",
-}
-
-
 def main():
     st.set_page_config(page_title="Context-1 Data Generation",
                         page_icon="🔍", layout="wide")
@@ -254,7 +271,6 @@ def main():
     # ─── Sidebar ─────────────────────────────────────────────────────────────
     st.sidebar.title("🔍 Configuration")
     
-    # .env toggle
     st.sidebar.markdown("### 🔐 Source de Keys")
     use_env = st.sidebar.checkbox(
         "Usar archivo .env",
@@ -263,24 +279,16 @@ def main():
     )
     st.session_state.use_env_file = use_env
     
-    # Pollination section (only when .env mode is active)
-    pollination_model = None
     if use_env:
-        st.sidebar.markdown("### 🌸 Pollination AI (gratis)")
-        st.sidebar.caption("No requiere API key — modelos gratuitos")
-        selected_label = st.sidebar.selectbox(
-            "Modelo",
-            options=list(POLLINATION_MODELS.keys()),
-            index=0,
-            key="pollination_label",
+        st.sidebar.markdown("### 🌸 LLM Provider (desde .env)")
+        st.sidebar.caption(
+            "Usa BASETEN_API_KEY del `.env` → gpt-oss-20b via Baseten\n"
+            "Sin API key → intenta Pollination AI (gen.pollinations.ai)"
         )
-        pollination_model = POLLINATION_MODELS[selected_label]
-        st.session_state.pollination_model = pollination_model
-        st.sidebar.caption(f"✅ `{pollination_model}` — sin API key")
+        st.sidebar.caption("✅ `.env` mode activo")
     else:
         st.sidebar.caption("📝 Ingresa las API keys manualmente abajo.")
     
-    # GitHub token
     st.sidebar.markdown("### 🔑 GitHub")
     github_token = st.sidebar.text_input(
         "GitHub Token",
@@ -289,7 +297,6 @@ def main():
         placeholder="ghp_...",
     )
     
-    # Pipeline settings
     st.sidebar.markdown("### ⚙️ Pipeline")
     domain = st.sidebar.selectbox(
         "Dominio",
@@ -308,7 +315,7 @@ def main():
     output_dir = st.sidebar.text_input("Output Directory", value="output")
     collection = st.sidebar.text_input("ChromaDB Collection", value="context1-data")
     
-    # Models (for non-.env mode only; .env mode uses Pollination AI fixed)
+    # Models (manual mode only)
     if not use_env:
         st.sidebar.markdown("### 🤖 Modelos")
         col1, col2 = st.sidebar.columns(2)
@@ -323,13 +330,11 @@ def main():
             extend_model = st.selectbox("Extend", options=MODEL_OPTIONS,
                 index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
     else:
-        # Fixed: Pollination AI openai/gpt-oss-20b for all stages
         explore_model = "openai/gpt-oss-20b"
         verify_model = "openai/gpt-oss-20b"
         distract_model = "openai/gpt-oss-20b"
         extend_model = "openai/gpt-oss-20b"
     
-    # Limits
     st.sidebar.markdown("### 🔄 Límites")
     col_l1, col_l2 = st.sidebar.columns(2)
     with col_l1:
@@ -341,7 +346,6 @@ def main():
         ext_rounds = st.number_input("Ext Rounds", min_value=0, max_value=20, value=0, key="ext_rounds")
         max_workers = st.number_input("Workers", min_value=1, max_value=32, value=8, key="max_workers")
     
-    # API Keys (manual mode only)
     if not use_env:
         st.sidebar.markdown("### 🔑 API Keys")
         anthropic_key = st.sidebar.text_input("Anthropic", type="password", placeholder="sk-ant-...")
@@ -354,6 +358,7 @@ def main():
         anthropic_key = openai_key = serper_key = jina_key = ""
         chroma_key = chroma_db = ""
     
+    pollination_model = "openai/gpt-oss-20b"
     config = PipelineConfig(
         repo_url=REPO_URL, domain=domain,
         seeds_file=seeds_file, output_dir=output_dir, collection=collection,
@@ -376,13 +381,13 @@ def main():
     use_env = st.session_state.use_env_file
     
     if use_env:
-        model_name = pollination_model or "openai/gpt-oss-20b"
         st.success(
-            f"**🔐 Modo .env activo** — Pollination AI (`{model_name}`) — "
-            f"no se necesita Anthropic ni OpenAI para el LLM."
+            "**🔐 Modo .env activo** — LLM desde `.env`:\n"
+            "- Si `BASETEN_API_KEY` existe → usa **Baseten** (gpt-oss-20b)\n"
+            "- Si no → usa **Pollination AI** (gen.pollinations.ai)"
         )
     else:
-        st.info("**📝 Modo manual** — Activa *Usar archivo .env* para usar Pollination AI.")
+        st.info("**📝 Modo manual** — Activa *Usar archivo .env* para usar el `.env` del repo.")
     
     tab1, tab2 = st.tabs(["🚀 Run Pipeline", "📊 Results"])
     
@@ -394,14 +399,14 @@ def main():
             status_placeholder = st.empty()
         with col2:
             st.subheader("Quick Info")
-            llm_info = f"**LLM:** `{pollination_model or 'claude (manual)'}` (Pollination AI)" if use_env else ""
             st.info(f"""
 **Dominio:** {DOMAIN_OPTIONS.get(config.domain, config.domain)}
-**Explore:** `{config.explore_model}` | **Verify:** `{config.verify_model}`
-**Distract:** `{config.distract_model}` | **Extend:** `{config.extend_model}`
+**Explore:** `{config.explore_model}`
+**Verify:** `{config.verify_model}`
+**Distract:** `{config.distract_model}`
+**Extend:** `{config.extend_model}`
 **Output:** `{config.output_dir}`
 **Collection:** `{config.collection}`
-**Seeds:** `{config.seeds_file}`
 """)
         
         run_clicked = st.button("🚀 Run Pipeline", type="primary",
@@ -423,19 +428,18 @@ def main():
             # Step 2: Install deps
             deps_info = st.session_state.get("deps_info")
             if deps_info is None:
-                with st.spinner("📦 Installing project dependencies (rich, tiktoken, anthropic, etc.)..."):
+                with st.spinner("📦 Installing project dependencies..."):
                     deps_ok, deps_msg, python_exe, sp_paths = install_project_deps(repo_path)
                 if deps_ok:
                     st.success(f"✅ {deps_msg}")
                     st.session_state.deps_info = (python_exe, sp_paths)
                 else:
-                    st.warning(f"⚠️ {deps_msg} — intentando continuar...")
+                    st.warning(f"⚠️ {deps_msg}")
                     python_exe = sys.executable
                     sp_paths = []
                     st.session_state.deps_info = (python_exe, sp_paths)
             else:
                 python_exe, sp_paths = deps_info
-                st.info(f"✅ Usando Python: `{python_exe}`")
             
             # Step 3: Load env from .env
             env_vars = load_env_file(repo_path)
@@ -446,15 +450,22 @@ def main():
                 for k, v in env_vars.items():
                     st.write(f"  `{k}` = `{v[:8]}...`")
             
-            # Step 4: Override for Pollination AI
-            if use_env and pollination_model:
-                env_vars["OPENAI_API_BASE"] = "https://gen.pollinations.ai/v1"
-                env_vars["OPENAI_API_KEY"] = "not-needed"
-                # Remove Anthropic so the code doesn't try to use it
-                env_vars.pop("ANTHROPIC_API_KEY", None)
-                env_vars.pop("BASETEN_API_KEY", None)
-                st.success(f"🌸 **Pollination AI** activo — modelo `{pollination_model}`")
-                st.caption("Base URL: `https://gen.pollinations.ai/v1` — sin API key")
+            # Step 4: Patch pipeline for LLM provider
+            if use_env:
+                with st.spinner("🔧 Patching pipeline for LLM provider..."):
+                    patch_ok, patch_msg = patch_pipeline_for_baseten(repo_path)
+                st.info(f"LLM Provider patches:\n{patch_msg}")
+                
+                baseten_key = env_vars.get("BASETEN_API_KEY", "")
+                if baseten_key:
+                    env_vars["OPENAI_API_KEY"] = baseten_key
+                    env_vars["OPENAI_API_BASE"] = "https://app.baseten.co"
+                    st.success("🌸 **Baseten** activo — modelo `gpt-oss-20b` via Baseten")
+                else:
+                    env_vars["OPENAI_API_BASE"] = "https://gen.pollinations.ai/v1"
+                    env_vars["OPENAI_API_KEY"] = "not-needed"
+                    env_vars.pop("ANTHROPIC_API_KEY", None)
+                    st.success("🌸 **Pollination AI** activo — sin API key")
             
             # Step 5: Validate
             validation_errors = validate_api_keys_from_env(env_vars, config.domain, use_env)
@@ -470,7 +481,7 @@ def main():
                 success, message = run_pipeline(
                     config, output_placeholder, status_placeholder,
                     env_vars, python_exe, sp_paths,
-                    use_env=use_env, pollination_model=pollination_model or "openai/gpt-oss-20b",
+                    use_env=use_env, pollination_model=pollination_model,
                 )
             if success:
                 status_placeholder.success(f"✅ {message}")
