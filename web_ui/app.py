@@ -29,8 +29,17 @@ def get_repo_path() -> Path:
 
 
 def load_env_file(repo_path: Path) -> dict:
-    env_path = repo_path / ".env"
+    """Load environment variables from .env file in the repo.
+    
+    Tries multiple locations:
+    1. .env in the downloaded repo (if committed to web-ui branch)
+    2. .env in the user's local installation (J:\... or where streamlit is run)
+    3. .env.example as reference
+    """
     env_vars = {}
+    
+    # Try 1: .env in downloaded repo
+    env_path = repo_path / ".env"
     if env_path.exists():
         with open(env_path) as f:
             for line in f:
@@ -38,8 +47,49 @@ def load_env_file(repo_path: Path) -> dict:
                 if line and not line.startswith("#") and "=" in line:
                     key, value = line.split("=", 1)
                     env_vars[key.strip()] = value.strip()
-    else:
-        env_vars["__ERROR__"] = f".env not found at {env_path}"
+        return env_vars
+    
+    # Try 2: .env in the same directory as this script (user's local install)
+    this_script = Path(__file__)
+    local_env = this_script.parent / ".env"
+    if local_env.exists():
+        with open(local_env) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    env_vars[key.strip()] = value.strip()
+        return env_vars
+    
+    # Try 3: .env in parent of web_ui folder (repo root)
+    repo_root = this_script.parent.parent
+    root_env = repo_root / ".env"
+    if root_env.exists():
+        with open(root_env) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    env_vars[key.strip()] = value.strip()
+        return env_vars
+    
+    # Try 4: Look for .env in common locations from J:\ drive
+    if os.name == "nt":
+        for candidate in [
+            Path(os.environ.get("USERPROFILE", "")) / "AI_Products" / "context-1-data-gen-etheroi" / ".env",
+            Path("J:/") / "context-1-data-gen-etheroi" / ".env",
+            Path("J:/AI_Products/context-1-data-gen-etheroi/.env"),
+        ]:
+            if candidate.exists():
+                with open(candidate) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            key, value = line.split("=", 1)
+                            env_vars[key.strip()] = value.strip()
+                return env_vars
+    
+    env_vars["__ERROR__"] = f".env not found at {env_path}"
     return env_vars
 
 
