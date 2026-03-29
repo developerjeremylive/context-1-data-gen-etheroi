@@ -7,6 +7,7 @@ import sys
 import subprocess
 import tempfile
 import shutil
+import site
 from pathlib import Path
 
 import streamlit as st
@@ -60,67 +61,136 @@ def clone_repo_if_needed(token: str) -> tuple[bool, str, Path]:
         return False, f"Failed to clone: {e.stderr}", repo_path
 
 
-def install_project_deps(repo_path: Path, status_callback=None) -> tuple[bool, str]:
-    """Install the project's Python dependencies (rich, anthropic, etc.)."""
-    python_exec = sys.executable
+def find_venv_python(repo_path: Path) -> tuple[str, list[str]]:
+    """
+    Find the Python executable and site-packages in the repo's venv.
+    Returns (python_executable, site_packages_paths).
+    """
+    # Common venv locations
+    for venv_name in [".venv", "venv", ".venv37"]:
+        venv_path = repo_path / venv_name
+        if venv_path.exists():
+            # Windows: Scripts/python.exe, Linux/Mac: bin/python
+            for exe_name in ["python.exe", "python3.exe", "python"]:
+                python_exe = venv_path / ("Scripts" if os.name == "nt" else "bin") / exe_name
+                if python_exe.exists():
+                    # Get site-packages
+                    sp_paths = subprocess.run(
+                        [str(python_exe), "-c",
+                         "import site; print('|'.join(site.getsitepackages()))"],
+                        capture_output=True, text=True,
+                    )
+                    if sp_paths.returncode == 0:
+                        paths = sp_paths.stdout.strip().split("|")
+                        return str(python_exe), paths
     
-    # Try uv first, then pip
-    for installer in ["uv", "pip"]:
-        if installer == "uv":
-            check_cmd = [installer, "sync", "--dry-run"]
-        else:
-            check_cmd = [installer, "install", "--dry-run", "."]
-        
-        result = subprocess.run(
-            check_cmd, cwd=str(repo_path),
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            break
+    # Fallback: use current python but add repo .venv site-packages manually
+    current_python = sys.executable
+    # uv creates .venv in repo, add its site-packages
+    venv_sp = repo_path / ".venv" / ("lib" if os.name != "nt" else "Lib") / "site-packages"
+    if venv_sp.exists():
+        return current_python, [str(venv_sp)]
     
-    # Install with uv if available
-    try:
-        result = subprocess.run(
-            [installer, "sync", "--all-extras"],
-            cwd=str(repo_path), capture_output=True, text=True,
-            timeout=120,
-        )
-        if result.returncode == 0:
-            return True, f"Dependencies installed via {installer}"
-    except Exception:
-        pass
-    
-    # Fallback to pip
-    try:
-        result = subprocess.run(
-            [python_exec, "-m", "pip", "install", "-e", ".[all]"],
-            cwd=str(repo_path), capture_output=True, text=True,
-            timeout=300,
-        )
-        if result.returncode == 0:
-            return True, "Dependencies installed via pip"
-    except Exception as e:
-        return False, f"Failed to install dependencies: {e}"
-    
-    return False, f"Could not install deps (tried uv and pip)"
+    return current_python, []
 
 
-def run_pipeline(config: PipelineConfig, output_placeholder, status_placeholder, env: dict) -> tuple[bool, str]:
-    """Run the pipeline with the given environment."""
+def install_project_deps(repo_path: Path) -> tuple[bool, str, str, list[str]]:
+    """
+    Install project dependencies using uv.
+    Returns (success, message, python_executable, site_packages_paths).
+    Uses the repo's .venv python so packages are findable.
+    """
+    # First try uv sync
+    result = subprocess.run(
+        ["uv", "sync", "--all-extras"],
+        cwd=str(repo_path), capture_output=True, text=True,
+        timeout=180,
+    )
+    
+    if result.returncode == 0:
+        python_exe, sp_paths = find_venv_python(repo_path)
+        return True, "Dependencies installed via uv sync", python_exe, sp_paths
+    
+    # Fallback: pip install into repo's venv
+    python_exe, sp_paths = find_venv_python(repo_path)
+    if not sp_paths:
+        # No venv found, create one
+        venv_result = subprocess.run(
+            ["uv", "venv", str(repo_path / ".venv")],
+            cwd=str(repo_path), capture_output=True, text=True,
+            timeout=60,
+        )
+        if venv_result.returncode == 0:
+            python_exe, sp_paths = find_venv_python(repo_path)
+    
+    result = subprocess.run(
+        [python_exe, "-m", "pip", "install", "-e", ".[all]"],
+        cwd=str(repo_path), capture_output=True, text=True,
+        timeout=300,
+    )
+    
+    if result.returncode == 0:
+        return True, "Dependencies installed via pip", python_exe, sp_paths
+    
+    return False, f"Failed to install deps: {result.stderr[-500:]}", python_exe, sp_paths
+
+
+def run_pipeline(
+    config: PipelineConfig,
+    output_placeholder,
+    status_placeholder,
+    env: dict,
+    python_exe: str,
+    extra_python_paths: list[str],
+) -> tuple[bool, str]:
+    """Run the pipeline with the given environment and Python paths."""
     repo_path = get_repo_path()
-    full_env = os.environ.copy()
-    full_env["PYTHONPATH"] = str(repo_path)
-    full_env.update(env)
     
-    # Remove empty env vars to avoid confusion
-    for key in [k for k, v in full_env.items() if not v]:
-        del full_env[key]
+    # Build env: start fresh, set PYTHONPATH to include venv site-packages
+    clean_env = {}
+    for key in ["PATH", "SYSTEMROOT", "TEMP", "TMP"]:
+        if key in os.environ:
+            clean_env[key] = os.environ[key]
     
-    cmd = build_command(config, str(repo_path))
+    clean_env["PYTHONPATH"] = str(repo_path)
+    for sp in extra_python_paths:
+        clean_env["PYTHONPATH"] += os.pathsep + sp
+    
+    clean_env.update(env)
+    
+    # Remove empty env vars
+    for key in [k for k, v in clean_env.items() if not v]:
+        del clean_env[key]
+    
+    # Use the venv python
+    cmd = [
+        python_exe,
+        "-m",
+        f"agentic_search_data_gen.domains.{config.domain}",
+        "--seeds", config.seeds_file,
+        "--output", config.output_dir,
+        "--collection", config.collection,
+        "--explore-model", config.explore_model,
+        "--verify-model", config.verify_model,
+        "--distract-model", config.distract_model,
+        "--extend-model", config.extend_model,
+        "--explore-max-iterations", str(config.explore_max_iterations),
+        "--verify-max-retries", str(config.verify_max_retries),
+        "--distract-max-iterations", str(config.distract_max_iterations),
+        "--extend-max-iterations", str(config.extend_max_iterations),
+        "--extension-rounds", str(config.extension_rounds),
+        "--max-workers", str(config.max_workers),
+    ]
+    
     try:
         process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            cwd=str(repo_path), env=full_env, text=True, bufsize=1,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(repo_path),
+            env=clean_env,
+            text=True,
+            bufsize=1,
         )
         output_lines = []
         for line in process.stdout:
@@ -140,63 +210,64 @@ def get_generated_files(output_dir: str) -> list[str]:
 
 # ─── Session state init ────────────────────────────────────────────────────────
 def _init_state():
-    for key in ["use_env_file", "deps_installed"]:
+    for key in ["use_env_file", "deps_info", "pollination_model"]:
         if key not in st.session_state:
-            st.session_state[key] = False if key == "use_env_file" else None
+            if key == "pollination_model":
+                st.session_state[key] = "openai/gpt-oss-20b"
+            else:
+                st.session_state[key] = None
 
 
 _init_state()
 
 
-# ─── Pollination AI section (only when .env mode active) ──────────────────────
+# ─── Pollination AI models ─────────────────────────────────────────────────────
 POLLINATION_MODELS = {
-    "openai-fast (gpt-oss-20b)": "pollinationai/llama-3-70b-instruct",
+    "openai-fast (gpt-oss-20b)": "openai/gpt-oss-20b",
     "Mistral 7B": "mistralai/mistral-7b-instruct",
     "Qwen 2.5 72B": "qwen/qwen-2.5-72b-instruct",
+    "DeepSeek V3": "deepseek-ai/DeepSeek-V3-0324",
+    "Llama 3.1 70B": "meta-llama/llama-3.1-70b-instruct",
 }
 
 
-def render_pollination_section():
-    """Render Pollination AI model selector when .env mode is active."""
-    st.sidebar.markdown("### 🌸 Pollination AI")
-    st.sidebar.caption("Modelos gratuitos — no requiere API key")
+def main():
+    st.set_page_config(page_title="Context-1 Data Generation",
+                        page_icon="🔍", layout="wide")
     
-    selected = st.sidebar.selectbox(
-        "Modelo",
-        options=list(POLLINATION_MODELS.keys()),
-        index=0,
-        key="pollination_model",
-    )
+    st.title("🔍 Context-1 Data Generation")
+    st.markdown("Generate synthetic multi-hop search tasks")
     
-    return POLLINATION_MODELS[selected]
-
-
-def render_sidebar() -> tuple[str, PipelineConfig]:
-    """Render sidebar and return (github_token, config)."""
+    # ─── Sidebar ─────────────────────────────────────────────────────────────
     st.sidebar.title("🔍 Configuration")
     
-    # ─── .env Toggle ─────────────────────────────────────────────────────────
+    # .env toggle
     st.sidebar.markdown("### 🔐 Source de Keys")
-    
     use_env = st.sidebar.checkbox(
         "Usar archivo .env",
-        value=st.session_state.use_env_file,
-        help="Si está activo, las API keys se leen del archivo .env en el repositorio. "
-             "Se ocultan los campos de API keys en el menú izquierdo.",
+        value=st.session_state.get("use_env_file", False),
         key="use_env_file_cb",
     )
     st.session_state.use_env_file = use_env
     
-    # ─── Pollination section (only when .env is active) ─────────────────────
+    # Pollination section (only when .env mode is active)
     pollination_model = None
     if use_env:
-        pollination_model = render_pollination_section()
-        if use_env:
-            st.sidebar.caption("✅ Cargando keys desde `.env` + Pollination AI")
+        st.sidebar.markdown("### 🌸 Pollination AI (gratis)")
+        st.sidebar.caption("No requiere API key — modelos gratuitos")
+        selected_label = st.sidebar.selectbox(
+            "Modelo",
+            options=list(POLLINATION_MODELS.keys()),
+            index=0,
+            key="pollination_label",
+        )
+        pollination_model = POLLINATION_MODELS[selected_label]
+        st.session_state.pollination_model = pollination_model
+        st.sidebar.caption(f"✅ `{pollination_model}` — sin API key")
     else:
         st.sidebar.caption("📝 Ingresa las API keys manualmente abajo.")
     
-    # ─── GitHub Token ───────────────────────────────────────────────────────
+    # GitHub token
     st.sidebar.markdown("### 🔑 GitHub")
     github_token = st.sidebar.text_input(
         "GitHub Token",
@@ -205,9 +276,8 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
         placeholder="ghp_...",
     )
     
-    # ─── Pipeline Settings ─────────────────────────────────────────────────
+    # Pipeline settings
     st.sidebar.markdown("### ⚙️ Pipeline")
-    
     domain = st.sidebar.selectbox(
         "Dominio",
         options=list(DOMAIN_OPTIONS.keys()),
@@ -221,13 +291,11 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
         "patents": "agentic_search_data_gen/domains/patents/seeds.txt",
         "epstein": "agentic_search_data_gen/domains/epstein/seeds.txt",
     }
-    default_seeds = seeds_file_map.get(domain, "seeds.txt")
-    
-    seeds_file = st.sidebar.text_input("Seeds File", value=default_seeds)
+    seeds_file = st.sidebar.text_input("Seeds File", value=seeds_file_map.get(domain, "seeds.txt"))
     output_dir = st.sidebar.text_input("Output Directory", value="output")
     collection = st.sidebar.text_input("ChromaDB Collection", value="context1-data")
     
-    # ─── Models ─────────────────────────────────────────────────────────────
+    # Models (for non-.env or as override)
     st.sidebar.markdown("### 🤖 Modelos")
     col1, col2 = st.sidebar.columns(2)
     with col1:
@@ -241,87 +309,60 @@ def render_sidebar() -> tuple[str, PipelineConfig]:
         extend_model = st.selectbox("Extend", options=MODEL_OPTIONS,
             index=MODEL_OPTIONS.index("claude-sonnet-4-5"))
     
-    # ─── Limits ─────────────────────────────────────────────────────────────
+    # Limits
     st.sidebar.markdown("### 🔄 Límites")
     col_l1, col_l2 = st.sidebar.columns(2)
     with col_l1:
-        st.number_input("Explore Iterations", min_value=1, max_value=200,
-                         value=20, key="explore_iter")
-        st.number_input("Verify Retries", min_value=1, max_value=20,
-                         value=3, key="verify_retries")
-        st.number_input("Distract Iterations", min_value=1, max_value=200,
-                         value=15, key="distract_iter")
+        explore_max = st.number_input("Explore", min_value=1, max_value=200, value=20, key="explore_iter")
+        verify_max = st.number_input("Verify Retries", min_value=1, max_value=20, value=3, key="verify_retries")
+        distract_max = st.number_input("Distract", min_value=1, max_value=200, value=15, key="distract_iter")
     with col_l2:
-        st.number_input("Extend Iterations", min_value=1, max_value=200,
-                         value=20, key="extend_iter")
-        st.number_input("Extension Rounds", min_value=0, max_value=20,
-                         value=0, key="ext_rounds")
-        st.number_input("Max Workers", min_value=1, max_value=32,
-                         value=8, key="max_workers")
+        extend_max = st.number_input("Extend", min_value=1, max_value=200, value=20, key="extend_iter")
+        ext_rounds = st.number_input("Ext Rounds", min_value=0, max_value=20, value=0, key="ext_rounds")
+        max_workers = st.number_input("Workers", min_value=1, max_value=32, value=8, key="max_workers")
     
-    explore_max = st.session_state.get("explore_iter", 20)
-    verify_max  = st.session_state.get("verify_retries", 3)
-    distract_max = st.session_state.get("distract_iter", 15)
-    extend_max  = st.session_state.get("extend_iter", 20)
-    ext_rounds  = st.session_state.get("ext_rounds", 0)
-    max_workers = st.session_state.get("max_workers", 8)
-    
-    # ─── API Keys (manual mode only) ─────────────────────────────────────────
+    # API Keys (manual mode only)
     if not use_env:
         st.sidebar.markdown("### 🔑 API Keys")
-        anthropic_api_key = st.sidebar.text_input(
-            "Anthropic", type="password", placeholder="sk-ant-...")
-        openai_api_key = st.sidebar.text_input(
-            "OpenAI", type="password", placeholder="sk-...")
-        serper_api_key = st.sidebar.text_input(
-            "Serper", type="password", placeholder="...")
-        jina_api_key = st.sidebar.text_input(
-            "Jina", type="password", placeholder="...")
-        chroma_api_key = st.sidebar.text_input(
-            "Chroma API Key", type="password", placeholder="...")
-        chroma_database = st.sidebar.text_input(
-            "Chroma Database", type="password", placeholder="...")
+        anthropic_key = st.sidebar.text_input("Anthropic", type="password", placeholder="sk-ant-...")
+        openai_key = st.sidebar.text_input("OpenAI", type="password", placeholder="sk-...")
+        serper_key = st.sidebar.text_input("Serper", type="password", placeholder="...")
+        jina_key = st.sidebar.text_input("Jina", type="password", placeholder="...")
+        chroma_key = st.sidebar.text_input("Chroma API", type="password", placeholder="...")
+        chroma_db = st.sidebar.text_input("Chroma DB", type="password", placeholder="...")
     else:
-        anthropic_api_key = openai_api_key = serper_api_key = ""
-        jina_api_key = chroma_api_key = chroma_database = ""
+        anthropic_key = openai_key = serper_key = jina_key = ""
+        chroma_key = chroma_db = ""
     
     config = PipelineConfig(
         repo_url=REPO_URL, domain=domain,
         seeds_file=seeds_file, output_dir=output_dir, collection=collection,
         explore_model=explore_model, verify_model=verify_model,
         distract_model=distract_model, extend_model=extend_model,
-        explore_max_iterations=explore_max, verify_max_retries=verify_max,
-        distract_max_iterations=distract_max, extend_max_iterations=extend_max,
-        extension_rounds=ext_rounds, max_workers=max_workers,
-        anthropic_api_key=anthropic_api_key, openai_api_key=openai_api_key,
-        serper_api_key=serper_api_key, jina_api_key=jina_api_key,
-        chroma_api_key=chroma_api_key, chroma_database=chroma_database,
+        explore_max_iterations=st.session_state.explore_iter,
+        verify_max_retries=st.session_state.verify_retries,
+        distract_max_iterations=st.session_state.distract_iter,
+        extend_max_iterations=st.session_state.extend_iter,
+        extension_rounds=st.session_state.ext_rounds,
+        max_workers=st.session_state.max_workers,
+        anthropic_api_key=anthropic_key, openai_api_key=openai_key,
+        serper_api_key=serper_key, jina_api_key=jina_key,
+        chroma_api_key=chroma_key, chroma_database=chroma_db,
         use_env_file=use_env,
         pollination_model=pollination_model,
     )
     
-    return github_token, config
-
-
-def main():
-    st.set_page_config(page_title="Context-1 Data Generation",
-                        page_icon="🔍", layout="wide")
-    
-    st.title("🔍 Context-1 Data Generation")
-    st.markdown("Generate synthetic multi-hop search tasks")
-    
-    github_token, config = render_sidebar()
-    
-    # Mode banner
+    # ─── Main area ─────────────────────────────────────────────────────────────
     use_env = st.session_state.use_env_file
+    
     if use_env:
-        model = config.pollination_model or "default"
+        model_name = pollination_model or "openai/gpt-oss-20b"
         st.success(
-            f"**🔐 Modo .env activo** — Keys desde `.env` + "
-            f"**Pollination AI** (`{model}`). No se necesita Anthropic API key."
+            f"**🔐 Modo .env activo** — Pollination AI (`{model_name}`) — "
+            f"no se necesita Anthropic ni OpenAI para el LLM."
         )
     else:
-        st.info("**📝 Modo manual** — Activa *Usar archivo .env* para usar el `.env` del repo.")
+        st.info("**📝 Modo manual** — Activa *Usar archivo .env* para usar Pollination AI.")
     
     tab1, tab2 = st.tabs(["🚀 Run Pipeline", "📊 Results"])
     
@@ -333,19 +374,15 @@ def main():
             status_placeholder = st.empty()
         with col2:
             st.subheader("Quick Info")
-            info_text = f"""
+            llm_info = f"**LLM:** `{pollination_model or 'claude (manual)'}` (Pollination AI)" if use_env else ""
+            st.info(f"""
 **Dominio:** {DOMAIN_OPTIONS.get(config.domain, config.domain)}
-**Explore:** `{config.explore_model}`
-**Verify:** `{config.verify_model}`
-**Distract:** `{config.distract_model}`
-**Extend:** `{config.extend_model}`
+**Explore:** `{config.explore_model}` | **Verify:** `{config.verify_model}`
+**Distract:** `{config.distract_model}` | **Extend:** `{config.extend_model}`
 **Output:** `{config.output_dir}`
 **Collection:** `{config.collection}`
 **Seeds:** `{config.seeds_file}`
-"""
-            if use_env and config.pollination_model:
-                info_text += f"\n**LLM:** `{config.pollination_model}` (Pollination AI)"
-            st.info(info_text)
+""")
         
         run_clicked = st.button("🚀 Run Pipeline", type="primary",
                                 use_container_width=True)
@@ -363,36 +400,41 @@ def main():
                 return
             st.success(f"✅ {message}")
             
-            # Step 2: Install deps (if not already done)
-            deps_status = st.session_state.get("deps_installed")
-            if deps_status is not True:
-                with st.spinner("📦 Installing project dependencies (rich, tiktoken, etc.)..."):
-                    deps_ok, deps_msg = install_project_deps(repo_path)
+            # Step 2: Install deps
+            deps_info = st.session_state.get("deps_info")
+            if deps_info is None:
+                with st.spinner("📦 Installing project dependencies (rich, tiktoken, anthropic, etc.)..."):
+                    deps_ok, deps_msg, python_exe, sp_paths = install_project_deps(repo_path)
                 if deps_ok:
                     st.success(f"✅ {deps_msg}")
-                    st.session_state.deps_installed = True
+                    st.session_state.deps_info = (python_exe, sp_paths)
                 else:
                     st.warning(f"⚠️ {deps_msg} — intentando continuar...")
+                    python_exe = sys.executable
+                    sp_paths = []
+                    st.session_state.deps_info = (python_exe, sp_paths)
+            else:
+                python_exe, sp_paths = deps_info
+                st.info(f"✅ Usando Python: `{python_exe}`")
             
-            # Step 3: Load env vars from .env
+            # Step 3: Load env from .env
             env_vars = load_env_file(repo_path)
-            
-            # Show debug
             st.markdown("**🔍 Debug — Loaded env vars:**")
             if "__ERROR__" in env_vars:
                 st.error(env_vars["__ERROR__"])
             else:
                 for k, v in env_vars.items():
-                    display_val = v[:8] + "..." if len(v) > 8 else v
-                    st.write(f"  `{k}` = `{display_val}`")
+                    st.write(f"  `{k}` = `{v[:8]}...`")
             
-            # Step 4: Override for Pollination AI when .env mode
-            if use_env and config.pollination_model:
-                env_vars["OPENAI_API_BASE"] = "https://llm.pollination.ai"
+            # Step 4: Override for Pollination AI
+            if use_env and pollination_model:
+                env_vars["OPENAI_API_BASE"] = "https://gen.pollinations.ai/v1"
                 env_vars["OPENAI_API_KEY"] = "not-needed"
-                # Don't need Anthropic with Pollination
+                # Remove Anthropic so the code doesn't try to use it
                 env_vars.pop("ANTHROPIC_API_KEY", None)
-                st.success(f"🌸 Usando **Pollination AI** — modelo `{config.pollination_model}`")
+                env_vars.pop("BASETEN_API_KEY", None)
+                st.success(f"🌸 **Pollination AI** activo — modelo `{pollination_model}`")
+                st.caption("Base URL: `https://gen.pollinations.ai/v1` — sin API key")
             
             # Step 5: Validate
             validation_errors = validate_api_keys_from_env(env_vars, config.domain, use_env)
@@ -405,8 +447,10 @@ def main():
             # Step 6: Run
             status_placeholder.info("🚀 Running pipeline...")
             with st.spinner("⚙️ Running..."):
-                success, message = run_pipeline(config, output_placeholder,
-                                               status_placeholder, env_vars)
+                success, message = run_pipeline(
+                    config, output_placeholder, status_placeholder,
+                    env_vars, python_exe, sp_paths,
+                )
             if success:
                 status_placeholder.success(f"✅ {message}")
             else:
