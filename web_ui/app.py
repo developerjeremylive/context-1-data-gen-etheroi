@@ -876,9 +876,7 @@ def main():
 
             # Step 4: Patches applied during zipball download
             if use_env:
-                # Capture patches from the download step
-                _patches = _apply_all_patches(repo_path, env)
-                patch_msg = "\n".join(_patches) if _patches else "No patches applied"
+                patch_msg = "\n".join(patches) if patches else "No patches applied"
                 st.info(f"LLM Provider patches:\n{patch_msg}")
 
                 # Set Pollination AI env vars (don't override existing OPENAI_API_BASE/OPENAI_MODEL if user set them)
