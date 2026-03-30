@@ -443,10 +443,17 @@ def get_pollination_client():
     explore_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "explore.py"
     if explore_file.exists():
         content = explore_file.read_text(encoding="utf-8")
-        patched = content.replace(
-            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        client = get_anthropic_client()\n        super().__init__(client, model, max_iterations)",
-            "    def __init__(self, model: str = \"claude-sonnet-4-5\", max_iterations: int = 20):\n        baseten_key = sys.modules[\"os\"].getenv(\"BASETEN_API_KEY\", \"\")\n        print(f\"[DEBUG explore.py] BASETEN_API_KEY from env = '{baseten_key}'\")\n        if baseten_key:\n            from openai import OpenAI\n            client = OpenAI(api_key=baseten_key, base_url=\"https://app.baseten.co\")\n        else:\n            from .client_wrapper import get_pollination_client\n            client = get_pollination_client()\n        print(f\"[DEBUG explore.py] Client type: {type(client).__name__}\")\n        super().__init__(client, model, max_iterations)"
-        )
+        # Replace the client line inside __init__ (works whether file uses tabs or spaces)
+        old_client_line = "        client = get_anthropic_client()"
+        new_client_block = """        import sys as _sys_mod
+        baseten_key = _sys_mod.modules["os"].getenv("BASETEN_API_KEY", "")
+        if baseten_key:
+            from openai import OpenAI
+            client = OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
+        else:
+            from .client_wrapper import get_pollination_client
+            client = get_pollination_client()"""
+        patched = content.replace(old_client_line, new_client_block)
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
             patches.append("  ✓ Patched explore.py")
