@@ -141,7 +141,7 @@ def clone_repo_if_needed(token: str, force_reclone: bool = True) -> tuple[bool, 
                                     dst.write(src.read())
         
         # ── NOW apply all patches to the freshly downloaded repo ──
-        patches = _apply_all_patches(repo_path, env, patches)
+        patches = _apply_all_patches(repo_path, env)
         
         return True, f"Downloaded and patched web-ui branch to {repo_path}", repo_path
     except Exception:
@@ -375,8 +375,8 @@ class _ToolUseBlock:
                 pass
 
 
-def _apply_all_patches(repo_path: Path, env: dict, patches: list) -> list:
-    """Apply all patches to the downloaded repo: utils.py, __main__.py, explore.py, client_wrapper."""
+def _apply_all_patches(repo_path: Path, env: dict) -> list:
+    """Apply all patches to the downloaded repo. Returns list of patch messages."""
     
     # ─── Patch core/utils.py — add get_pollination_client ───────────────────
     utils_file = repo_path / "agentic_search_data_gen" / "core" / "utils.py"
@@ -876,7 +876,9 @@ def main():
 
             # Step 4: Patches applied during zipball download
             if use_env:
-                patch_msg = "\n".join(patches) if patches else "No patches applied"
+                # Capture patches from the download step
+                _patches = _apply_all_patches(repo_path, env)
+                patch_msg = "\n".join(_patches) if _patches else "No patches applied"
                 st.info(f"LLM Provider patches:\n{patch_msg}")
 
                 # Set Pollination AI env vars (don't override existing OPENAI_API_BASE/OPENAI_MODEL if user set them)
