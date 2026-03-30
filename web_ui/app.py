@@ -460,33 +460,28 @@ def get_pollination_client():
         patched = content_no_dotenv
         
         # Find the get_anthropic_client() call inside __init__ and replace it
-        # We'll do a targeted replacement, preserving original indentation
+        # Line-by-line replacement to preserve exact indentation
         lines = content.split("\n")
         new_lines = []
         replaced = False
         for i, line in enumerate(lines):
-            # Look for the client line (with 8 spaces for method body inside class)
             if line.strip() == "client = get_anthropic_client()" and not replaced:
-                # Determine indentation from the original line
                 indent = len(line) - len(line.lstrip())
                 indent_str = " " * indent
-                # Build replacement block with same indentation
                 new_lines.append(f"{indent_str}import sys as _sys_mod")
                 new_lines.append(f"{indent_str}anthropic_key = _sys_mod.modules[\"os\"].getenv(\"ANTHROPIC_API_KEY\", \"\")")
                 new_lines.append(f"{indent_str}if anthropic_key:")
                 new_lines.append(f"{indent_str}    from ...core.utils import get_anthropic_client")
                 new_lines.append(f"{indent_str}    client = get_anthropic_client()")
-                new_lines.append(f"{indent_str}else:")
+                new_lines.append(f"{indent_str}else:  # ANTHROPIC_API_KEY removed by app → use Pollination AI")
                 new_lines.append(f"{indent_str}    from .client_wrapper import get_pollination_client")
                 new_lines.append(f"{indent_str}    client = get_pollination_client()")
                 replaced = True
-                patches.append("  ✓ Patched explore.py (replaced get_anthropic_client with Pollination AI)")
             else:
                 new_lines.append(line)
-        patched = "\n".join(new_lines)
-        if patched != content:
+        if replaced:
             explore_file.write_text(patched, encoding="utf-8")
-            patches.append("  ✓ Patched explore.py")
+            patches.append("  ✓ Patched explore.py (replaced get_anthropic_client)")
 
     # ─── Create the client wrapper module ───────────────────────────────────
     wrapper_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "client_wrapper.py"
