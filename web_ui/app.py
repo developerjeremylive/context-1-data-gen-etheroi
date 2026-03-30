@@ -415,12 +415,18 @@ def get_pollination_client():
         # Always inject _get_llm_client helper before def main() (only if not present)
         if "def _get_llm_client():" not in content:
             helper_func = '''def _get_llm_client():
-    """Get the LLM client: Pollination AI (free) or Baseten if API key is set."""
+    """Get the LLM client for the pipeline — always use Pollination AI (free, no API key needed).
+    
+    We check ANTHROPIC_API_KEY (not BASETEN_API_KEY) to decide, because ANTHROPIC_API_KEY
+    is the one we remove from the subprocess env. If ANTHROPIC_API_KEY is gone, we know
+    we're in Pollination mode and should use that instead of falling back to Baseten.
+    """
     import sys
-    baseten_key = sys.modules["os"].getenv("BASETEN_API_KEY", "")
-    if baseten_key:
-        from openai import OpenAI
-        return OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
+    # Use sys.modules to avoid UnboundLocalError on 'os' in nested scope
+    anthropic_key = sys.modules["os"].getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        from ...core.utils import get_anthropic_client
+        return get_anthropic_client()
     else:
         from .client_wrapper import get_pollination_client
         return get_pollination_client()
