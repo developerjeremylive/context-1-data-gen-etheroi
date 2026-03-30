@@ -443,6 +443,16 @@ def get_pollination_client():
     explore_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "explore.py"
     if explore_file.exists():
         content = explore_file.read_text(encoding="utf-8")
+        # Remove load_dotenv() call from explore.py (app handles env vars already)
+        content_no_dotenv = content
+        if "from dotenv import load_dotenv" in content or "import dotenv" in content:
+            content_no_dotenv = content.replace("from dotenv import load_dotenv\n", "")
+            content_no_dotenv = content_no_dotenv.replace("load_dotenv()\n", "")
+            if content_no_dotenv != content:
+                patches.append("  ✓ Patched explore.py (removed load_dotenv)")
+        
+        patched = content_no_dotenv
+        
         # Try with 8-space indent first (explore.py: class body = 4 spaces, method body = 8 spaces)
         old_line_8 = "        client = get_anthropic_client()"
         new_block_8 = """        import sys as _sys_mod
@@ -453,8 +463,9 @@ def get_pollination_client():
         else:
             from .client_wrapper import get_pollination_client
             client = get_pollination_client()"""
-        patched = content.replace(old_line_8, new_block_8)
-        if patched == content:
+        if old_line_8 in patched:
+            patched = patched.replace(old_line_8, new_block_8)
+        else:
             # Try with 4-space indent (alternative formatting)
             old_line_4 = "    client = get_anthropic_client()"
             new_block_4 = """    import sys as _sys_mod
@@ -465,7 +476,8 @@ def get_pollination_client():
     else:
         from .client_wrapper import get_pollination_client
         client = get_pollination_client()"""
-            patched = content.replace(old_line_4, new_block_4)
+            if old_line_4 in patched:
+                patched = patched.replace(old_line_4, new_block_4)
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
             patches.append("  ✓ Patched explore.py")
