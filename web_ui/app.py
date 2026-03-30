@@ -459,34 +459,31 @@ def get_pollination_client():
         
         patched = content_no_dotenv
         
-        # Replace the client line inside __init__ — always use Pollination AI (ANTHROPIC_API_KEY is never in subprocess)
-        old_line_8 = "        client = get_anthropic_client()"
-        new_block_8 = """        import sys as _sys_mod
-        anthropic_key = _sys_mod.modules["os"].getenv("ANTHROPIC_API_KEY", "")
-        if anthropic_key:
-            from ...core.utils import get_anthropic_client
-            client = get_anthropic_client()
-        else:
-            from .client_wrapper import get_pollination_client
-            client = get_pollination_client()"""
-        if old_line_8 in patched:
-            patched = patched.replace(old_line_8, new_block_8)
-        else:
-            # Try with 4-space indent (alternative)
-            old_line_4 = "    client = get_anthropic_client()"
-            new_block_4 = """    import sys as _sys_mod
-    anthropic_key = _sys_mod.modules["os"].getenv("ANTHROPIC_API_KEY", "")
-    if anthropic_key:
-        from ...core.utils import get_anthropic_client
-        client = get_anthropic_client()
-    else:
-        from .client_wrapper import get_pollination_client
-        client = get_pollination_client()"""
-            if old_line_4 in patched:
-                patched = patched.replace(old_line_4, new_block_4)
-        if patched != content:
-            explore_file.write_text(patched, encoding="utf-8")
-            patches.append("  ✓ Patched explore.py")
+        # Find the get_anthropic_client() call inside __init__ and replace it
+        # We'll do a targeted replacement, preserving original indentation
+        lines = content.split("\n")
+        new_lines = []
+        replaced = False
+        for i, line in enumerate(lines):
+            # Look for the client line (with 8 spaces for method body inside class)
+            if line.strip() == "client = get_anthropic_client()" and not replaced:
+                # Determine indentation from the original line
+                indent = len(line) - len(line.lstrip())
+                indent_str = " " * indent
+                # Build replacement block with same indentation
+                new_lines.append(f"{indent_str}import sys as _sys_mod")
+                new_lines.append(f"{indent_str}anthropic_key = _sys_mod.modules[\"os\"].getenv(\"ANTHROPIC_API_KEY\", \"\")")
+                new_lines.append(f"{indent_str}if anthropic_key:")
+                new_lines.append(f"{indent_str}    from ...core.utils import get_anthropic_client")
+                new_lines.append(f"{indent_str}    client = get_anthropic_client()")
+                new_lines.append(f"{indent_str}else:")
+                new_lines.append(f"{indent_str}    from .client_wrapper import get_pollination_client")
+                new_lines.append(f"{indent_str}    client = get_pollination_client()")
+                replaced = True
+                patches.append("  ✓ Patched explore.py (replaced get_anthropic_client with Pollination AI)")
+            else:
+                new_lines.append(line)
+        patched = "\n".join(new_lines)
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
             patches.append("  ✓ Patched explore.py")
