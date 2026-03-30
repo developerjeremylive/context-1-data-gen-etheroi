@@ -459,31 +459,34 @@ def get_pollination_client():
         
         patched = content_no_dotenv
         
-        # Try with 8-space indent first (explore.py: class body = 4 spaces, method body = 8 spaces)
+        # Replace the client line inside __init__ — always use Pollination AI (ANTHROPIC_API_KEY is never in subprocess)
         old_line_8 = "        client = get_anthropic_client()"
         new_block_8 = """        import sys as _sys_mod
-        baseten_key = _sys_mod.modules["os"].getenv("BASETEN_API_KEY", "")
-        if baseten_key:
-            from openai import OpenAI
-            client = OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
+        anthropic_key = _sys_mod.modules["os"].getenv("ANTHROPIC_API_KEY", "")
+        if anthropic_key:
+            from ...core.utils import get_anthropic_client
+            client = get_anthropic_client()
         else:
             from .client_wrapper import get_pollination_client
             client = get_pollination_client()"""
         if old_line_8 in patched:
             patched = patched.replace(old_line_8, new_block_8)
         else:
-            # Try with 4-space indent (alternative formatting)
+            # Try with 4-space indent (alternative)
             old_line_4 = "    client = get_anthropic_client()"
             new_block_4 = """    import sys as _sys_mod
-    baseten_key = _sys_mod.modules["os"].getenv("BASETEN_API_KEY", "")
-    if baseten_key:
-        from openai import OpenAI
-        client = OpenAI(api_key=baseten_key, base_url="https://app.baseten.co")
+    anthropic_key = _sys_mod.modules["os"].getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        from ...core.utils import get_anthropic_client
+        client = get_anthropic_client()
     else:
         from .client_wrapper import get_pollination_client
         client = get_pollination_client()"""
             if old_line_4 in patched:
                 patched = patched.replace(old_line_4, new_block_4)
+        if patched != content:
+            explore_file.write_text(patched, encoding="utf-8")
+            patches.append("  ✓ Patched explore.py")
         if patched != content:
             explore_file.write_text(patched, encoding="utf-8")
             patches.append("  ✓ Patched explore.py")
