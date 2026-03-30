@@ -139,7 +139,11 @@ def clone_repo_if_needed(token: str, force_reclone: bool = True) -> tuple[bool, 
                                 (repo_path / target).parent.mkdir(parents=True, exist_ok=True)
                                 with zf.open(member) as src, open(repo_path / target, "wb") as dst:
                                     dst.write(src.read())
-        return True, f"Downloaded web-ui branch (zipball) to {repo_path}", repo_path
+        
+        # ── NOW apply all patches to the freshly downloaded repo ──
+        patches = _apply_all_patches(repo_path, env, patches)
+        
+        return True, f"Downloaded and patched web-ui branch to {repo_path}", repo_path
     except Exception:
         pass
     
@@ -371,27 +375,17 @@ class _ToolUseBlock:
                 pass
 
 
-# ─── Patching functions ────────────────────────────────────────────────────────
-def patch_pipeline_for_pollination(repo_path: Path) -> tuple[bool, str]:
-    """
-    Patch pipeline modules to use the OpenAIMessagesClient wrapper.
-    This translates Anthropic SDK calls → OpenAI-compatible calls for Pollinations AI.
-    """
-    patches = []
-
+def _apply_all_patches(repo_path: Path, env: dict, patches: list) -> list:
+    """Apply all patches to the downloaded repo: utils.py, __main__.py, explore.py, client_wrapper."""
+    
     # ─── Patch core/utils.py — add get_pollination_client ───────────────────
     utils_file = repo_path / "agentic_search_data_gen" / "core" / "utils.py"
     if utils_file.exists():
         content = utils_file.read_text(encoding="utf-8")
         if "def get_pollination_client():" not in content:
-            # Import the client class definition into the patched file
             client_code = '''
 def get_pollination_client():
-    """Get an OpenAI-compatible client that works with Pollinations AI.
-
-    Provides `.messages.create(...)` interface (Anthropic-style) but calls
-    OpenAI-compatible endpoint, translating calls automatically.
-    """
+    """Get an OpenAI-compatible client that works with Pollinations AI."""
     import os
     base_url = os.getenv("OPENAI_API_BASE", "https://gen.pollinations.ai/v1")
     api_key = os.getenv("OPENAI_API_KEY", "not-needed")
@@ -412,17 +406,10 @@ def get_pollination_client():
     main_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "__main__.py"
     if main_file.exists():
         content = main_file.read_text(encoding="utf-8")
-        # Always inject _get_llm_client helper before def main() (only if not present)
         if "def _get_llm_client():" not in content:
             helper_func = '''def _get_llm_client():
-    """Get the LLM client for the pipeline — always use Pollination AI (free, no API key needed).
-    
-    We check ANTHROPIC_API_KEY (not BASETEN_API_KEY) to decide, because ANTHROPIC_API_KEY
-    is the one we remove from the subprocess env. If ANTHROPIC_API_KEY is gone, we know
-    we're in Pollination mode and should use that instead of falling back to Baseten.
-    """
+    """Get the LLM client for the pipeline — always use Pollination AI (free)."""
     import sys
-    # Use sys.modules to avoid UnboundLocalError on 'os' in nested scope
     anthropic_key = sys.modules["os"].getenv("ANTHROPIC_API_KEY", "")
     if anthropic_key:
         from ...core.utils import get_anthropic_client
@@ -436,10 +423,9 @@ def get_pollination_client():
             if "def main():" in content:
                 idx = content.find("def main():")
                 content = content[:idx] + helper_func + content[idx:]
-        # Now do the replacement (always, even if helper was already there)
         patched = content.replace(
             "client = get_anthropic_client()",
-            "client = _get_llm_client()\n    print(f\"[DEBUG __main__] Client type: {type(client).__name__}, model: {getattr(client, 'model', 'unknown')}\")"
+            "client = _get_llm_client()"
         )
         if patched != content:
             main_file.write_text(patched, encoding="utf-8")
@@ -449,22 +435,16 @@ def get_pollination_client():
     explore_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "explore.py"
     if explore_file.exists():
         content = explore_file.read_text(encoding="utf-8")
-        # Remove load_dotenv() call from explore.py (app handles env vars already)
-        content_no_dotenv = content
-        if "from dotenv import load_dotenv" in content or "import dotenv" in content:
-            content_no_dotenv = content.replace("from dotenv import load_dotenv\n", "")
-            content_no_dotenv = content_no_dotenv.replace("load_dotenv()\n", "")
-            if content_no_dotenv != content:
-                patches.append("  ✓ Patched explore.py (removed load_dotenv)")
+        # Remove load_dotenv() call
+        if "from dotenv import load_dotenv" in content:
+            content = content.replace("from dotenv import load_dotenv\n", "")
+            content = content.replace("load_dotenv()\n", "")
         
-        patched = content_no_dotenv
-        
-        # Find the get_anthropic_client() call inside __init__ and replace it
-        # Line-by-line replacement to preserve exact indentation
+        # Replace client line line-by-line
         lines = content.split("\n")
         new_lines = []
         replaced = False
-        for i, line in enumerate(lines):
+        for line in lines:
             if line.strip() == "client = get_anthropic_client()" and not replaced:
                 indent = len(line) - len(line.lstrip())
                 indent_str = " " * indent
@@ -473,20 +453,21 @@ def get_pollination_client():
                 new_lines.append(f"{indent_str}if anthropic_key:")
                 new_lines.append(f"{indent_str}    from ...core.utils import get_anthropic_client")
                 new_lines.append(f"{indent_str}    client = get_anthropic_client()")
-                new_lines.append(f"{indent_str}else:  # ANTHROPIC_API_KEY removed by app → use Pollination AI")
+                new_lines.append(f"{indent_str}else:")
                 new_lines.append(f"{indent_str}    from .client_wrapper import get_pollination_client")
                 new_lines.append(f"{indent_str}    client = get_pollination_client()")
                 replaced = True
             else:
                 new_lines.append(line)
+        patched = "\n".join(new_lines)
         if replaced:
             explore_file.write_text(patched, encoding="utf-8")
-            patches.append("  ✓ Patched explore.py (replaced get_anthropic_client)")
+            patches.append("  ✓ Patched explore.py")
 
-    # ─── Create the client wrapper module ───────────────────────────────────
+    # ─── Create client_wrapper.py ───────────────────────────────────────────
     wrapper_file = repo_path / "agentic_search_data_gen" / "domains" / "web" / "client_wrapper.py"
     wrapper_content = '''
-"""OpenAI-compatible client wrapper for Pollinations AI.
+"""OpenAI-compatible client wrapper for Pollinations AI."""
 
 Provides `.messages.create(...)` interface (Anthropic-style) but calls
 OpenAI-compatible endpoint, translating calls automatically.
@@ -893,11 +874,10 @@ def main():
                 for k, v in env_vars.items():
                     st.write(f"  `{k}` = `{v[:8]}...`")
 
-            # Step 4: Patch pipeline for Pollination AI
+            # Step 4: Patches applied during zipball download
             if use_env:
-                with st.spinner("🔧 Patching pipeline for Pollination AI..."):
-                    patch_ok, patch_msg = patch_pipeline_for_pollination(repo_path)
-                st.info(f"LLM Provider patches:\\n{patch_msg}")
+                patch_msg = "\n".join(patches) if patches else "No patches applied"
+                st.info(f"LLM Provider patches:\n{patch_msg}")
 
                 # Set Pollination AI env vars (don't override existing OPENAI_API_BASE/OPENAI_MODEL if user set them)
                 if "OPENAI_API_BASE" not in env_vars or not env_vars.get("OPENAI_API_BASE"):
